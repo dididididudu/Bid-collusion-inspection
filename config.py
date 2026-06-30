@@ -19,7 +19,6 @@ class DetectionConfig:
     SCORE_WEIGHT_MAX: float = 0.4  # 最大相似度权重
     SCORE_WEIGHT_TOP_K: float = 0.3  # Top-K相似度权重
     SCORE_WEIGHT_MEAN: float = 0.2  # 平均相似度权重
-    SCORE_WEIGHT_COVERAGE: float = 0.1  # 覆盖率权重
     SCORE_TOP_K: int = 5  # Top-K取前K个
     
     # SBERT动态阈值参数
