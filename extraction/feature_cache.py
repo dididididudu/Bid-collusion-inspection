@@ -31,7 +31,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 2  # v2: 新增 embedding 列、document_embeddings 表、metadata_fingerprints 表
+    SCHEMA_VERSION = 3  # v3: 新增 image_ocr_results 表
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -101,6 +101,9 @@ class DocumentCache:
             # v2 迁移：新增嵌入和元数据指纹支持
             if current_version < 2:
                 self._migrate_v2(cursor)
+            # v3 迁移：新增图片 OCR 结果表
+            if current_version < 3:
+                self._migrate_v3(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -144,6 +147,27 @@ class DocumentCache:
             "ON metadata_fingerprints(software_fingerprint, time_bucket)"
         )
         logger.info("v2 模式迁移完成：嵌入 + 文档向量 + 元数据指纹")
+
+    def _migrate_v3(self, cursor):
+        """v3 迁移：图片 OCR 结果表"""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS image_ocr_results (
+                doc_id TEXT NOT NULL,
+                page_num INTEGER NOT NULL,
+                image_hash TEXT NOT NULL,
+                ocr_text TEXT DEFAULT '',
+                ocr_words_json TEXT DEFAULT '[]',
+                text_bboxes_json TEXT DEFAULT '[]',
+                confidence REAL DEFAULT 0.0,
+                PRIMARY KEY (doc_id, page_num, image_hash),
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ocr_doc "
+            "ON image_ocr_results(doc_id)"
+        )
+        logger.info("v3 模式迁移完成：图片 OCR 结果表")
 
     def _create_tables(self, cursor):
         """创建所有表"""
@@ -723,6 +747,54 @@ class DocumentCache:
                 'time_bucket': row[5] or '',
             }
         return result
+
+    # ================================================================
+    # 图片 OCR 结果 CRUD
+    # ================================================================
+
+    def store_image_ocr_result(
+        self, doc_id: str, page_num: int, image_hash: str,
+        ocr_text: str = '', ocr_words: List[str] = None,
+        bboxes: List[Dict] = None, confidence: float = 0.0,
+    ) -> None:
+        """存储单张图片的 OCR 结果"""
+        import json as _json
+        self.conn.execute(
+            "INSERT OR REPLACE INTO image_ocr_results "
+            "(doc_id, page_num, image_hash, ocr_text, ocr_words_json, "
+            "text_bboxes_json, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                doc_id, page_num, image_hash, ocr_text,
+                _json.dumps(ocr_words or [], ensure_ascii=False),
+                _json.dumps(bboxes or [], ensure_ascii=False),
+                confidence,
+            )
+        )
+        self.conn.commit()
+
+    def load_image_ocr_results(
+        self, doc_id: str
+    ) -> List[Dict]:
+        """加载文档的所有图片 OCR 结果"""
+        import json as _json
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
+            "text_bboxes_json, confidence FROM image_ocr_results "
+            "WHERE doc_id = ? ORDER BY page_num",
+            (doc_id,)
+        )
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'page_num': row[0],
+                'image_hash': row[1],
+                'ocr_text': row[2] or '',
+                'ocr_words': _json.loads(row[3] or '[]'),
+                'bboxes': _json.loads(row[4] or '[]'),
+                'confidence': row[5] or 0.0,
+            })
+        return results
 
     # ================================================================
     # 候选对 CRUD

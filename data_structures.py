@@ -164,9 +164,29 @@ class MetadataEvidence:
 
 @dataclass
 class ImageEvidence:
-    """图片重复证据"""
+    """图片重复证据（增强版 — 四层检测）"""
+    # 哈希层
     common_image_count: int = 0
     common_image_hashes: List[str] = field(default_factory=list)
+    exact_image_count: int = 0           # L1: 完全相同的图片对
+    near_identical_count: int = 0        # L1: 几乎相同的图片对
+    similar_image_count: int = 0         # L1: 相似的图片对
+
+    # OCR 层
+    ps_suspicious: bool = False          # L2: PS 嫌疑
+    ps_suspicious_count: int = 0
+    shared_typos: List[str] = field(default_factory=list)  # L3: 相同错别字
+    shared_typo_count: int = 0
+    text_identical_count: int = 0        # L4: 图片文字完全相同
+    text_similar_count: int = 0          # L4: 图片文字高度相似
+
+    # OCR 原始结果
+    ocr_results_a: List[Dict] = field(default_factory=list)
+    ocr_results_b: List[Dict] = field(default_factory=list)
+
+    # 综合
+    image_risk_score: int = 0            # 图片维度风险分 (0-30)
+    image_risk_factors: List[str] = field(default_factory=list)
 
 
 @dataclass

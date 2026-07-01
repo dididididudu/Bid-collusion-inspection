@@ -32,6 +32,8 @@ from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.checkpoint import CheckpointManager
 from pipeline.streaming_context import StreamingContext
 from embedding.embedding_engine import EmbeddingEngine
+from image_analysis.image_ocr import ImageOCREngine, OCRResult
+from image_analysis.image_matcher import ImageMatcher, ImageMatchResult
 from scoring import RiskScoringEngine
 from report import ReportGenerator
 
@@ -56,6 +58,12 @@ class BidDetectionOrchestrator:
         self.paragraph_matcher = ParagraphMatcher(config)
         self.scoring_engine = RiskScoringEngine(config)
         self.report_generator = ReportGenerator(config)
+
+        # 图片分析引擎（OCR + 四层检测）
+        self.ocr_engine = ImageOCREngine(
+            use_gpu=config.USE_GPU,
+        )
+        self.image_matcher = ImageMatcher()
 
         # 跨阶段缓存：避免重复从 SQLite 加载文档特征
         self._all_features_cache = None
@@ -681,19 +689,76 @@ class BidDetectionOrchestrator:
                 doc_a.metadata.time_bucket == doc_b.metadata.time_bucket
             )
 
-        # 图片证据（精确匹配）
-        image_evidence = ImageEvidence()
-        hashes_a = set(doc_a.image_hashes)
-        hashes_b = set(doc_b.image_hashes)
-        common = list(hashes_a & hashes_b)
-        image_evidence.common_image_count = len(common)
-        image_evidence.common_image_hashes = common
+        # 图片证据（增强版：四层检测）
+        image_evidence = self._build_image_evidence(doc_a, doc_b)
 
         return EvidenceChain(
             text_evidence=text_evidence,
             metadata_evidence=metadata_evidence,
             image_evidence=image_evidence,
         )
+
+    def _build_image_evidence(
+        self, doc_a: BidFeature, doc_b: BidFeature
+    ) -> ImageEvidence:
+        """构建增强图片证据 — 四层检测（哈希 + OCR + 错字 + 文字相同）"""
+        evidence = ImageEvidence()
+
+        # 保留原有的精确哈希匹配
+        hashes_a = doc_a.image_hashes
+        hashes_b = doc_b.image_hashes
+        common_exact = list(set(hashes_a) & set(hashes_b))
+        evidence.common_image_count = len(common_exact)
+        evidence.common_image_hashes = common_exact
+
+        # 加载 OCR 结果
+        ocr_a = self.cache.load_image_ocr_results(doc_a.doc_id)
+        ocr_b = self.cache.load_image_ocr_results(doc_b.doc_id)
+
+        if ocr_a:
+            evidence.ocr_results_a = ocr_a
+        if ocr_b:
+            evidence.ocr_results_b = ocr_b
+
+        # 使用 ImageMatcher 执行四层检测
+        ocr_objects_a = [
+            OCRResult(
+                text=r['ocr_text'],
+                words=r['ocr_words'],
+                bboxes=r['bboxes'],
+                confidence=r['confidence'],
+            ) for r in ocr_a
+        ]
+        ocr_objects_b = [
+            OCRResult(
+                text=r['ocr_text'],
+                words=r['ocr_words'],
+                bboxes=r['bboxes'],
+                confidence=r['confidence'],
+            ) for r in ocr_b
+        ]
+
+        match_result = self.image_matcher.analyze(
+            hashes_a=hashes_a,
+            hashes_b=hashes_b,
+            ocr_results_a=ocr_objects_a if ocr_objects_a else None,
+            ocr_results_b=ocr_objects_b if ocr_objects_b else None,
+        )
+
+        # 填充增强字段
+        evidence.exact_image_count = match_result.exact_image_count
+        evidence.near_identical_count = match_result.near_identical_count
+        evidence.similar_image_count = match_result.similar_image_count
+        evidence.ps_suspicious = match_result.ps_suspicious
+        evidence.ps_suspicious_count = match_result.ps_suspicious_count
+        evidence.shared_typos = match_result.shared_typos
+        evidence.shared_typo_count = match_result.shared_typo_count
+        evidence.text_identical_count = match_result.text_identical_count
+        evidence.text_similar_count = match_result.text_similar_count
+        evidence.image_risk_score = match_result.image_risk_score
+        evidence.image_risk_factors = match_result.image_risk_factors
+
+        return evidence
 
     def _build_text_evidence(
         self,

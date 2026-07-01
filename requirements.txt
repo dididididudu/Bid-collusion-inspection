@@ -17,3 +17,8 @@ datasketch>=1.6.0          # 专业 MinHash LSH 实现
 # === 可选：GPU/ONNX 加速 ===
 # optimum[onnxruntime]>=1.12.0  # ONNX Runtime GPU 加速（可选，需手动安装）
 # onnxruntime-gpu>=1.15.0       # CUDA GPU 推理（可选）
+
+# === 图片 OCR 分析 ===
+easyocr>=1.7.0                # 图片文字提取（首选，中文支持好）
+# paddlepaddle>=3.0.0         # PaddleOCR 备选（需额外安装）
+# paddleocr>=2.7.0

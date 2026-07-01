@@ -87,10 +87,22 @@ class RiskScoringEngine:
             total_covered = covered_a + covered_b
             coverage = min(1.0, total_covered / 50.0)  # 归一化到0-1
 
-        # 计算风险分数（0-100）
+        # 计算风险分数（文本 70 + 图片 30 = 0-100）
         max_para_sim = max((m['similarity'] for m in paragraph_matches), default=0)
-        score = int(text_local * 60 + max_para_sim * 30 + coverage * 10)
-        score = min(100, max(0, score))
+        text_score = int(text_local * 60 + max_para_sim * 30 + coverage * 10)
+        text_score = min(70, max(0, text_score))
+
+        # 图片维度评分（来自四层检测结果）
+        image_evidence = evidence.image_evidence
+        image_score = image_evidence.image_risk_score if hasattr(image_evidence, 'image_risk_score') else 0
+        image_score = min(30, image_score)
+
+        score = min(100, text_score + image_score)
+
+        # 图片风险因素
+        if hasattr(image_evidence, 'image_risk_factors'):
+            for img_factor in image_evidence.image_risk_factors:
+                risk_factors.append(f"📷 {img_factor}")
 
         # 改进的风险评级逻辑
         clone_count = len(continuous_clone_blocks)
