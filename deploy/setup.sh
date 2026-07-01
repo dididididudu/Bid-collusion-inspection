@@ -5,11 +5,19 @@
 # 用法:
 #   chmod +x setup.sh
 #   ./setup.sh
+#
+# 如果仍然超时，手动指定镜像:
+#   PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple ./setup.sh
 # ============================================================
 set -e
 
+PIP_MIRROR="${PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+HF_MIRROR="${HF_MIRROR:-https://hf-mirror.com}"
+
 echo "=============================================="
 echo "  Bid Collusion Detection — Server Setup"
+echo "  pip:  $PIP_MIRROR"
+echo "  hf:   $HF_MIRROR"
 echo "=============================================="
 
 # 1. 检测 Python
@@ -25,10 +33,27 @@ else
 fi
 source venv/bin/activate
 
-# 3. 安装依赖
+# 3. 安装依赖（使用国内镜像 + 重试）
 echo "[3/5] 安装 Python 依赖 (GPU 版)..."
-pip install --upgrade pip -q
-pip install -r requirements-gpu.txt -q
+pip install --upgrade pip -q -i "$PIP_MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 先装 PyTorch（最大的包，最容易超时）
+echo "  → 安装 PyTorch (CUDA)..."
+pip install torch torchvision torchaudio \
+    -i "$PIP_MIRROR" \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    --default-timeout=120 \
+    --retries 5 \
+    -q 2>&1 || echo "  PyTorch 安装失败，请手动执行: pip install torch -i $PIP_MIRROR"
+
+# 再装其余依赖
+echo "  → 安装其余依赖..."
+pip install -r requirements-gpu.txt \
+    -i "$PIP_MIRROR" \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    --default-timeout=120 \
+    --retries 5 \
+    -q 2>&1
 
 # 4. 检测 GPU
 echo "[4/5] 检测 GPU..."
@@ -42,9 +67,12 @@ else:
     print('  CUDA: 不可用，将使用 CPU')
 "
 
-# 5. 预下载模型（避免首次运行等待）
+# 5. 预下载模型（使用 HF 镜像）
 echo "[5/5] 预下载 SBERT 模型..."
+export HF_ENDPOINT="$HF_MIRROR"
 python -c "
+import os
+os.environ['HF_ENDPOINT'] = '$HF_MIRROR'
 from sentence_transformers import SentenceTransformer
 model = SentenceTransformer(
     'paraphrase-multilingual-MiniLM-L12-v2',
