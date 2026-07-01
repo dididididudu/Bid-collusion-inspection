@@ -1,0 +1,924 @@
+"""
+SQLite 特征缓存 - 将所有大型文本数据从内存转移到持久化存储
+
+设计目标:
+- 支持 100+ 文档 × 1000+ 页 PDF 的特征存储
+- 文本块使用 zlib 压缩存储（压缩比约 5:1~8:1）
+- 惰性加载：按需从 SQLite 加载文本内容
+- WAL 模式 + 批量提交，优化写入性能
+"""
+
+import os
+import zlib
+import json
+import sqlite3
+import logging
+from typing import List, Dict, Optional, Tuple, Generator, Any
+from datetime import datetime
+from contextlib import contextmanager
+
+from data_structures import (
+    BidFeature, ChunkMetadata, ChunkResult, PairwiseResult,
+    MetadataFeature, QuoteSignature
+)
+from config import DetectionConfig
+
+logger = logging.getLogger(__name__)
+
+
+class DocumentCache:
+    """SQLite 支持的文档特征缓存"""
+
+    # 当前数据库模式版本
+    SCHEMA_VERSION = 1
+
+    def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
+        """
+        Args:
+            cache_dir: SQLite 数据库文件目录
+            config: 检测配置（可选，用于读取参数）
+        """
+        self.config = config
+        os.makedirs(cache_dir, exist_ok=True)
+        self.db_path = os.path.join(cache_dir, "features.db")
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+
+        # 启用 WAL 模式提升并发写入性能
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
+        self.conn.execute("PRAGMA temp_store=MEMORY")
+
+        self._create_schema()
+        logger.info(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
+
+    def create_thread_connection(self) -> sqlite3.Connection:
+        """为工作线程创建独立的 SQLite 连接（线程安全）
+
+        每个线程需要自己的连接对象。使用 WAL 模式支持并发读写。
+        """
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-16000")  # 16MB per thread
+        conn.execute("PRAGMA temp_store=MEMORY")
+        return conn
+
+    @contextmanager
+    def transaction(self):
+        """事务上下文管理器，自动提交或回滚"""
+        try:
+            yield self.conn
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    # ================================================================
+    # 数据库模式
+    # ================================================================
+
+    def _create_schema(self):
+        """创建数据库表结构"""
+        cursor = self.conn.cursor()
+
+        # 版本管理
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 检查版本
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        row = cursor.fetchone()
+        current_version = row[0] if row[0] is not None else 0
+
+        if current_version < self.SCHEMA_VERSION:
+            self._create_tables(cursor)
+            cursor.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                (self.SCHEMA_VERSION,)
+            )
+            self.conn.commit()
+            logger.info(f"数据库模式已创建/升级到版本 {self.SCHEMA_VERSION}")
+
+    def _create_tables(self, cursor):
+        """创建所有表"""
+        # 文档注册表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                doc_id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                page_count INTEGER DEFAULT 0,
+                total_text_length INTEGER DEFAULT 0,
+                is_scanned INTEGER DEFAULT 0,
+                doc_simhash TEXT DEFAULT '',
+                doc_minhash TEXT DEFAULT '',
+                metadata_json TEXT DEFAULT '{}',
+                quote_values_json TEXT DEFAULT '[]',
+                quote_tail_dist_json TEXT DEFAULT '{}',
+                quote_count INTEGER DEFAULT 0,
+                quote_integer_ratio REAL DEFAULT 0.0,
+                quote_mean REAL DEFAULT 0.0,
+                quote_std REAL DEFAULT 0.0,
+                image_hashes_json TEXT DEFAULT '[]',
+                image_hash_count INTEGER DEFAULT 0,
+                chunk_count INTEGER DEFAULT 0,
+                extracted_at TEXT DEFAULT (datetime('now')),
+                processed INTEGER DEFAULT 0
+            )
+        """)
+
+        # 文本块表（压缩存储）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                start_page INTEGER NOT NULL,
+                end_page INTEGER NOT NULL,
+                text_length INTEGER NOT NULL,
+                text_blob BLOB,
+                simhash TEXT DEFAULT '',
+                paragraph_count INTEGER DEFAULT 0,
+                paragraph_hashes_json TEXT DEFAULT '[]',
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
+                UNIQUE(doc_id, chunk_index)
+            )
+        """)
+
+        # 段落表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paragraphs (
+                para_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                para_index INTEGER NOT NULL,
+                text TEXT,
+                minhash TEXT DEFAULT '',
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
+                FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id),
+                UNIQUE(doc_id, para_index)
+            )
+        """)
+
+        # 候选文档对表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_pairs (
+                pair_id TEXT PRIMARY KEY,
+                doc_a_id TEXT NOT NULL,
+                doc_b_id TEXT NOT NULL,
+                selection_method TEXT DEFAULT '',
+                doc_level_similarity REAL DEFAULT 0.0,
+                processed INTEGER DEFAULT 0,
+                UNIQUE(doc_a_id, doc_b_id)
+            )
+        """)
+
+        # 分析结果表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pairwise_results (
+                pair_id TEXT PRIMARY KEY,
+                doc_a_id TEXT NOT NULL,
+                doc_b_id TEXT NOT NULL,
+                text_similarity REAL DEFAULT 0.0,
+                risk_level TEXT DEFAULT 'NONE',
+                risk_score INTEGER DEFAULT 0,
+                risk_factors_json TEXT DEFAULT '[]',
+                match_count INTEGER DEFAULT 0,
+                clone_block_count INTEGER DEFAULT 0,
+                metadata_match_count INTEGER DEFAULT 0,
+                image_match_count INTEGER DEFAULT 0,
+                evidence_json TEXT DEFAULT '{}',
+                processed_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 段落匹配详情表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paragraph_matches (
+                match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair_id TEXT NOT NULL,
+                similarity REAL NOT NULL,
+                para_a_index INTEGER NOT NULL,
+                para_b_index INTEGER NOT NULL,
+                detection_method TEXT DEFAULT '',
+                is_continuous_clone INTEGER DEFAULT 0,
+                clone_group_id TEXT DEFAULT '',
+                FOREIGN KEY (pair_id) REFERENCES pairwise_results(pair_id)
+            )
+        """)
+
+        # 管道状态表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_state (
+                key TEXT PRIMARY KEY,
+                value TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # 创建索引
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id, chunk_index)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraphs_doc ON paragraphs(doc_id, para_index)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraphs_chunk ON paragraphs(chunk_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_candidate_pairs_processed ON candidate_pairs(processed)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraph_matches_pair ON paragraph_matches(pair_id)")
+
+    # ================================================================
+    # 文档 CRUD
+    # ================================================================
+
+    def store_document(self, doc: BidFeature) -> None:
+        """存储文档级特征"""
+        metadata_json = json.dumps({
+            'author': doc.metadata.author,
+            'creator': doc.metadata.creator,
+            'producer': doc.metadata.producer,
+            'created_time': doc.metadata.created_time,
+            'modified_time': doc.metadata.modified_time,
+            'software_fingerprint': doc.metadata.software_fingerprint,
+            'time_bucket': doc.metadata.time_bucket,
+        }, ensure_ascii=False)
+
+        with self.transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO documents (
+                    doc_id, filename, file_size, page_count, total_text_length,
+                    is_scanned, doc_simhash, doc_minhash,
+                    metadata_json,
+                    quote_values_json, quote_tail_dist_json,
+                    quote_count, quote_integer_ratio, quote_mean, quote_std,
+                    image_hashes_json, image_hash_count,
+                    chunk_count, extracted_at, processed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                doc.doc_id,
+                doc.filename,
+                doc.file_size,
+                doc.page_count,
+                doc.text_length,
+                1 if doc.is_scanned else 0,
+                doc.text_simhash,
+                json.dumps(doc.doc_minhash) if doc.doc_minhash else '',
+                metadata_json,
+                json.dumps(doc.quotes),
+                json.dumps(doc.quote_signature.tail_distribution),
+                doc.quote_signature.count,
+                doc.quote_signature.integer_ratio,
+                doc.quote_signature.mean,
+                doc.quote_signature.std,
+                json.dumps(doc.image_hashes),
+                len(doc.image_hashes),
+                doc.chunk_count,
+                doc.extracted_at,
+                1  # processed = True
+            ))
+
+    def load_document(self, doc_id: str) -> Optional[BidFeature]:
+        """加载单个文档特征"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_bid_feature(row)
+
+    def load_all_documents(self) -> List[BidFeature]:
+        """加载所有已处理文档的特征（轻量级，不含文本内容）"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM documents WHERE is_scanned = 0")
+        docs = []
+        for row in cursor.fetchall():
+            docs.append(self._row_to_bid_feature(row))
+        return docs
+
+    def get_unprocessed_docs(self) -> List[str]:
+        """获取尚未提取特征的文档路径列表（用于 Phase 1 恢复）"""
+        # 从 pipeline_state 中读取已处理的文件列表
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT value FROM pipeline_state WHERE key = 'processed_files'"
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return json.loads(row[0])
+        return []
+
+    def set_processed_files(self, file_paths: List[str]) -> None:
+        """记录已处理的文件列表"""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO pipeline_state (key, value, updated_at) VALUES (?, ?, datetime('now'))",
+                ('processed_files', json.dumps(file_paths))
+            )
+
+    def _row_to_bid_feature(self, row: tuple) -> BidFeature:
+        """将数据库行转换为 BidFeature"""
+        columns = [
+            'doc_id', 'filename', 'file_size', 'page_count', 'total_text_length',
+            'is_scanned', 'doc_simhash', 'doc_minhash',
+            'metadata_json', 'quote_values_json', 'quote_tail_dist_json',
+            'quote_count', 'quote_integer_ratio', 'quote_mean', 'quote_std',
+            'image_hashes_json', 'image_hash_count', 'chunk_count', 'extracted_at', 'processed'
+        ]
+        data = dict(zip(columns, row))
+
+        metadata_raw = json.loads(data['metadata_json'] or '{}')
+        metadata = MetadataFeature(
+            author=metadata_raw.get('author', ''),
+            creator=metadata_raw.get('creator', ''),
+            producer=metadata_raw.get('producer', ''),
+            created_time=metadata_raw.get('created_time', ''),
+            modified_time=metadata_raw.get('modified_time', ''),
+            software_fingerprint=metadata_raw.get('software_fingerprint', ''),
+            time_bucket=metadata_raw.get('time_bucket', ''),
+        )
+
+        quotes = json.loads(data['quote_values_json'] or '[]')
+
+        quote_sig = QuoteSignature(
+            count=data['quote_count'] or 0,
+            values=quotes,
+            tail_distribution=json.loads(data['quote_tail_dist_json'] or '{}'),
+            integer_ratio=data['quote_integer_ratio'] or 0.0,
+            mean=data['quote_mean'] or 0.0,
+            std=data['quote_std'] or 0.0,
+        )
+
+        doc_minhash = None
+        if data['doc_minhash']:
+            try:
+                doc_minhash = json.loads(data['doc_minhash'])
+            except (json.JSONDecodeError, TypeError):
+                doc_minhash = None
+
+        return BidFeature(
+            doc_id=data['doc_id'],
+            filename=data['filename'],
+            file_size=data['file_size'] or 0,
+            text_content="",  # 流式模式下不加载文本
+            text_length=data['total_text_length'] or 0,
+            text_simhash=data['doc_simhash'] or '',
+            paragraphs=[],  # 流式模式下不加载
+            paragraph_hashes=[],
+            metadata=metadata,
+            quotes=quotes,
+            quote_signature=quote_sig,
+            image_hashes=json.loads(data['image_hashes_json'] or '[]'),
+            extracted_at=data['extracted_at'] or '',
+            is_scanned=bool(data['is_scanned']),
+            page_count=data['page_count'] or 0,
+            doc_minhash=doc_minhash,
+            chunk_count=data['chunk_count'] or 0,
+        )
+
+    # ================================================================
+    # 文本块 CRUD
+    # ================================================================
+
+    def store_chunk(self, chunk_result: ChunkResult) -> None:
+        """存储文本块（文本内容 zlib 压缩）"""
+        # 压缩文本内容
+        text_bytes = chunk_result.text.encode('utf-8')
+        compressed = zlib.compress(text_bytes, level=6)
+
+        chunk_id = self._chunk_id(chunk_result.doc_id, chunk_result.chunk_index)
+        paragraph_hashes_json = json.dumps(chunk_result.paragraph_hashes)
+
+        with self.transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO chunks (
+                    chunk_id, doc_id, chunk_index, start_page, end_page,
+                    text_length, text_blob, simhash, paragraph_count, paragraph_hashes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                chunk_id,
+                chunk_result.doc_id,
+                chunk_result.chunk_index,
+                chunk_result.start_page,
+                chunk_result.end_page,
+                chunk_result.text_length if hasattr(chunk_result, 'text_length') else len(chunk_result.text),
+                compressed,
+                chunk_result.simhash,
+                len(chunk_result.paragraphs),
+                paragraph_hashes_json,
+            ))
+
+            # 批量存储段落数据（executemany 减少 Python-SQLite 往返）
+            para_rows = [
+                (
+                    self._para_id(chunk_result.doc_id, para_idx),
+                    chunk_result.doc_id, chunk_id,
+                    para_idx, para_text, para_hash
+                )
+                for para_idx, (para_text, para_hash) in enumerate(
+                    zip(chunk_result.paragraphs, chunk_result.paragraph_hashes)
+                )
+            ]
+            conn.executemany("""
+                INSERT OR REPLACE INTO paragraphs (
+                    para_id, doc_id, chunk_id, para_index, text, minhash
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, para_rows)
+
+    def load_chunk_text(self, doc_id: str, chunk_index: int) -> Optional[str]:
+        """加载文本块的原始文本（解压缩）"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT text_blob FROM chunks WHERE doc_id = ? AND chunk_index = ?",
+            (doc_id, chunk_index)
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return zlib.decompress(row[0]).decode('utf-8')
+        return None
+
+    def load_chunk_metadata(self, doc_id: str, chunk_index: int) -> Optional[ChunkMetadata]:
+        """加载文本块元数据（不含文本内容）"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT doc_id, chunk_index, start_page, end_page, text_length, simhash, paragraph_count "
+            "FROM chunks WHERE doc_id = ? AND chunk_index = ?",
+            (doc_id, chunk_index)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return ChunkMetadata(
+            doc_id=row[0],
+            chunk_index=row[1],
+            start_page=row[2],
+            end_page=row[3],
+            text_length=row[4],
+            simhash=row[5] or '',
+            paragraph_count=row[6] or 0,
+        )
+
+    def load_document_chunks(self, doc_id: str) -> List[ChunkMetadata]:
+        """加载文档的所有文本块元数据"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT doc_id, chunk_index, start_page, end_page, text_length, simhash, paragraph_count "
+            "FROM chunks WHERE doc_id = ? ORDER BY chunk_index",
+            (doc_id,)
+        )
+        return [
+            ChunkMetadata(
+                doc_id=row[0], chunk_index=row[1],
+                start_page=row[2], end_page=row[3],
+                text_length=row[4], simhash=row[5] or '',
+                paragraph_count=row[6] or 0,
+            )
+            for row in cursor.fetchall()
+        ]
+
+    def load_paragraph_hashes(self, doc_id: str, chunk_index: int) -> List[str]:
+        """加载文本块的段落哈希列表"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT paragraph_hashes_json FROM chunks WHERE doc_id = ? AND chunk_index = ?",
+            (doc_id, chunk_index)
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return json.loads(row[0])
+        return []
+
+    def load_paragraph_text(self, doc_id: str, para_index: int) -> Optional[str]:
+        """加载单个段落的文本"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT text FROM paragraphs WHERE doc_id = ? AND para_index = ?",
+            (doc_id, para_index)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def load_all_paragraph_minhashes(self, doc_id: str) -> Dict[int, str]:
+        """加载文档所有段落的 MinHash 签名（用于分析阶段）"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, minhash FROM paragraphs WHERE doc_id = ? ORDER BY para_index",
+            (doc_id,)
+        )
+        return {row[0]: row[1] for row in cursor.fetchall() if row[1]}
+
+    def load_paragraphs_in_range(self, doc_id: str, start_idx: int, end_idx: int) -> List[Dict]:
+        """加载指定范围的段落数据（含文本和 MinHash）"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, text, minhash FROM paragraphs "
+            "WHERE doc_id = ? AND para_index >= ? AND para_index < ? "
+            "ORDER BY para_index",
+            (doc_id, start_idx, end_idx)
+        )
+        return [
+            {
+                'para_index': row[0],
+                'text': row[1] or '',
+                'minhash': row[2] or '',
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def get_document_paragraph_count(self, doc_id: str) -> int:
+        """获取文档的总段落数"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT MAX(para_index) + 1 FROM paragraphs WHERE doc_id = ?",
+            (doc_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row[0] else 0
+
+    # ================================================================
+    # 候选对 CRUD
+    # ================================================================
+
+    def store_candidate_pairs(self, pairs: List[Tuple[str, str, str, float]]) -> None:
+        """批量存储候选对
+
+        Args:
+            pairs: [(doc_a_id, doc_b_id, method, similarity), ...]
+        """
+        with self.transaction() as conn:
+            rows = [
+                ("::".join(sorted([doc_a_id, doc_b_id])),
+                 doc_a_id, doc_b_id, method, similarity)
+                for doc_a_id, doc_b_id, method, similarity in pairs
+            ]
+            conn.executemany("""
+                INSERT OR IGNORE INTO candidate_pairs (
+                    pair_id, doc_a_id, doc_b_id, selection_method, doc_level_similarity
+                ) VALUES (?, ?, ?, ?, ?)
+            """, rows)
+
+    def get_unprocessed_pairs(self, limit: int = 0) -> List[Tuple[str, str]]:
+        """获取尚未分析的候选对"""
+        cursor = self.conn.cursor()
+        query = "SELECT doc_a_id, doc_b_id FROM candidate_pairs WHERE processed = 0"
+        if limit > 0:
+            query += f" LIMIT {limit}"
+        cursor.execute(query)
+        return [(row[0], row[1]) for row in cursor.fetchall()]
+
+    def mark_pair_processed(self, doc_a_id: str, doc_b_id: str) -> None:
+        """标记候选对为已处理（不单独 commit，由调用方批量提交）"""
+        pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+        self.conn.execute(
+            "UPDATE candidate_pairs SET processed = 1 WHERE pair_id = ?",
+            (pair_id,)
+        )
+
+    def get_total_candidate_pairs(self) -> int:
+        """获取候选对总数"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM candidate_pairs")
+        return cursor.fetchone()[0]
+
+    def get_processed_pair_count(self) -> int:
+        """获取已处理候选对数"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM candidate_pairs WHERE processed = 1")
+        return cursor.fetchone()[0]
+
+    # ================================================================
+    # 分析结果 CRUD
+    # ================================================================
+
+    def store_pairwise_result(self, result: PairwiseResult) -> None:
+        """存储单个分析结果"""
+        evidence = result.evidence
+        text_ev = evidence.text_evidence
+
+        evidence_json = json.dumps({
+            'metadata_matched_fields': evidence.metadata_evidence.matched_fields,
+            'metadata_matched_values': evidence.metadata_evidence.matched_values,
+            'same_time_bucket': evidence.metadata_evidence.same_time_bucket,
+            'image_common_hashes': evidence.image_evidence.common_image_hashes,
+            'detection_summary': text_ev.detection_summary,
+            'common_paragraphs': text_ev.common_paragraphs[:10],
+            'continuous_clone_blocks': text_ev.continuous_clone_blocks,
+        }, ensure_ascii=False)
+
+        with self.transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO pairwise_results (
+                    pair_id, doc_a_id, doc_b_id,
+                    text_similarity, risk_level, risk_score,
+                    risk_factors_json, match_count, clone_block_count,
+                    metadata_match_count, image_match_count, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                result.pair_id,
+                result.doc_a_id,
+                result.doc_b_id,
+                result.similarity_scores.get('text_local', 0),
+                result.risk_level,
+                result.risk_score,
+                json.dumps(result.risk_factors, ensure_ascii=False),
+                len(text_ev.paragraph_matches),
+                len(text_ev.continuous_clone_blocks),
+                len(evidence.metadata_evidence.matched_fields),
+                evidence.image_evidence.common_image_count,
+                evidence_json,
+            ))
+
+            # 批量存储段落匹配详情（executemany 减少往返）
+            if text_ev.paragraph_matches:
+                match_rows = [
+                    (
+                        result.pair_id,
+                        match.get('similarity', 0),
+                        match.get('paragraph_a_index', 0),
+                        match.get('paragraph_b_index', 0),
+                        match.get('detection_method', ''),
+                        1 if match.get('is_continuous_clone') else 0,
+                        match.get('continuous_clone_group_id', ''),
+                    )
+                    for match in text_ev.paragraph_matches
+                ]
+                conn.executemany("""
+                    INSERT INTO paragraph_matches (
+                        pair_id, similarity, para_a_index, para_b_index,
+                        detection_method, is_continuous_clone, clone_group_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, match_rows)
+
+    def load_all_results(self) -> List[PairwiseResult]:
+        """加载所有分析结果（含段落匹配+完整文本+高亮标记）"""
+        from data_structures import (
+            PairwiseResult, EvidenceChain, TextEvidence,
+            MetadataEvidence, ImageEvidence
+        )
+
+        results = []
+        cursor = self.conn.cursor()
+
+        # 加载配对结果
+        cursor.execute("SELECT * FROM pairwise_results ORDER BY risk_score DESC")
+        for row in cursor.fetchall():
+            cols = [
+                'pair_id', 'doc_a_id', 'doc_b_id', 'text_similarity',
+                'risk_level', 'risk_score', 'risk_factors_json',
+                'match_count', 'clone_block_count', 'metadata_match_count',
+                'image_match_count', 'evidence_json', 'processed_at'
+            ]
+            data = dict(zip(cols, row))
+
+            # 加载段落匹配
+            cursor2 = self.conn.cursor()
+            cursor2.execute(
+                "SELECT similarity, para_a_index, para_b_index, detection_method, "
+                "is_continuous_clone, clone_group_id "
+                "FROM paragraph_matches WHERE pair_id = ? ORDER BY similarity DESC",
+                (data['pair_id'],)
+            )
+            para_matches = [
+                {
+                    'similarity': r[0],
+                    'paragraph_a_index': r[1],
+                    'paragraph_b_index': r[2],
+                    'detection_method': r[3],
+                    'is_continuous_clone': bool(r[4]),
+                    'continuous_clone_group_id': r[5],
+                    'paragraph_a': '',
+                    'paragraph_b': '',
+                    'highlighted_text_a': '',
+                    'highlighted_text_b': '',
+                    'common_parts': [],
+                }
+                for r in cursor2.fetchall()
+            ]
+
+            # 填充段落文本并计算高亮标记
+            self._fill_paragraph_texts_and_highlights(
+                para_matches, data['doc_a_id'], data['doc_b_id']
+            )
+
+            # 解析证据 JSON
+            evidence_raw = json.loads(data['evidence_json'] or '{}')
+
+            text_evidence = TextEvidence(
+                local_similarity=data['text_similarity'] or 0.0,
+                common_paragraphs=evidence_raw.get('common_paragraphs', []),
+                paragraph_matches=para_matches,
+                continuous_clone_blocks=evidence_raw.get('continuous_clone_blocks', []),
+                detection_summary=evidence_raw.get('detection_summary', {}),
+            )
+
+            metadata_evidence = MetadataEvidence(
+                matched_fields=evidence_raw.get('metadata_matched_fields', []),
+                matched_values=evidence_raw.get('metadata_matched_values', {}),
+                same_time_bucket=evidence_raw.get('same_time_bucket', False),
+            )
+
+            image_evidence = ImageEvidence(
+                common_image_count=data['image_match_count'] or 0,
+                common_image_hashes=evidence_raw.get('image_common_hashes', []),
+            )
+
+            results.append(PairwiseResult(
+                pair_id=data['pair_id'],
+                doc_a_id=data['doc_a_id'],
+                doc_b_id=data['doc_b_id'],
+                similarity_scores={'text_local': data['text_similarity'] or 0.0},
+                risk_level=data['risk_level'] or 'NONE',
+                risk_score=data['risk_score'] or 0,
+                risk_factors=json.loads(data['risk_factors_json'] or '[]'),
+                evidence=EvidenceChain(
+                    text_evidence=text_evidence,
+                    metadata_evidence=metadata_evidence,
+                    image_evidence=image_evidence,
+                ),
+            ))
+
+        return results
+
+    # ================================================================
+    # 辅助方法
+    # ================================================================
+
+    @staticmethod
+    def _chunk_id(doc_id: str, chunk_index: int) -> str:
+        return f"{doc_id}_chunk_{chunk_index:04d}"
+
+    @staticmethod
+    def _para_id(doc_id: str, para_index: int) -> str:
+        return f"{doc_id}_para_{para_index:06d}"
+
+    # ================================================================
+    # 段落文本填充与高亮计算
+    # ================================================================
+
+    def _fill_paragraph_texts_and_highlights(
+        self, para_matches: List[Dict], doc_a_id: str, doc_b_id: str
+    ) -> None:
+        """为段落匹配填充完整文本并计算高亮标记和共同部分
+
+        从 paragraphs 表中加载段落文本，然后使用 difflib 计算
+        【】高亮标记文本和共同文本片段。
+
+        此方法原地修改 para_matches 列表中的每个字典。
+        """
+        if not para_matches:
+            return
+
+        # 批量加载两个文档的所有段落文本（避免逐条查询）
+        texts_a = self._batch_load_paragraph_texts(doc_a_id)
+        texts_b = self._batch_load_paragraph_texts(doc_b_id)
+
+        for match in para_matches:
+            idx_a = match.get('paragraph_a_index', -1)
+            idx_b = match.get('paragraph_b_index', -1)
+
+            # 从批量加载的字典中获取文本
+            text_a = texts_a.get(idx_a, '')
+            text_b = texts_b.get(idx_b, '')
+
+            if text_a:
+                match['paragraph_a'] = text_a
+            if text_b:
+                match['paragraph_b'] = text_b
+
+            # 计算高亮文本和共同部分
+            if text_a and text_b:
+                hl_a, hl_b, common = self._compute_text_diff_static(text_a, text_b)
+                match['highlighted_text_a'] = hl_a
+                match['highlighted_text_b'] = hl_b
+                match['common_parts'] = common
+
+    def _batch_load_paragraph_texts(self, doc_id: str) -> Dict[int, str]:
+        """批量加载文档的所有段落文本
+
+        Returns:
+            Dict[para_index, text]
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, text FROM paragraphs "
+            "WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
+            "ORDER BY para_index",
+            (doc_id,)
+        )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _compute_text_diff_static(text_a: str, text_b: str):
+        """计算两个文本的差异并生成高亮标记（静态方法）
+
+        使用 difflib.SequenceMatcher 找最长公共子串，
+        然后用【】标记相同部分。
+
+        Returns:
+            (highlighted_a, highlighted_b, common_parts):
+            - highlighted_a: 文本A的高亮版本（用【】标记相同部分）
+            - highlighted_b: 文本B的高亮版本（用【】标记相同部分）
+            - common_parts: 共同文本片段列表
+        """
+        from difflib import SequenceMatcher as SMatch
+
+        clean_a = text_a.strip()
+        clean_b = text_b.strip()
+
+        if not clean_a or not clean_b:
+            return text_a, text_b, []
+
+        sm = SMatch(None, clean_a, clean_b)
+        matching_blocks = sm.get_matching_blocks()
+
+        significant_blocks = [b for b in matching_blocks if b.size >= 10]
+
+        common_parts = []
+        for block in significant_blocks:
+            if block.size >= 10:
+                common_text = clean_a[block.a:block.a + block.size]
+                common_parts.append(common_text.strip())
+
+        common_parts.sort(key=len, reverse=True)
+        common_parts = common_parts[:20]
+
+        highlighted_a = DocumentCache._highlight_text_with_blocks(
+            clean_a, significant_blocks, 'a'
+        )
+        highlighted_b = DocumentCache._highlight_text_with_blocks(
+            clean_b, significant_blocks, 'b'
+        )
+
+        # 报告需要完整文本，50000字符基本等于不截断
+        if len(highlighted_a) > 50000:
+            highlighted_a = highlighted_a[:50000] + "\n... [文本过长，已截断]"
+        if len(highlighted_b) > 50000:
+            highlighted_b = highlighted_b[:50000] + "\n... [文本过长，已截断]"
+
+        return highlighted_a, highlighted_b, common_parts
+
+    @staticmethod
+    def _highlight_text_with_blocks(text: str, blocks: list, which: str) -> str:
+        """用匹配块标记文本中的相同部分（静态方法）"""
+        if not blocks:
+            return text
+
+        if which == 'a':
+            blocks = sorted(blocks, key=lambda b: b.a)
+        else:
+            blocks = sorted(blocks, key=lambda b: b.b)
+
+        result_parts = []
+        last_end = 0
+
+        for block in blocks:
+            if block.size < 10:
+                continue
+
+            if which == 'a':
+                start = block.a
+                end = block.a + block.size
+            else:
+                start = block.b
+                end = block.b + block.size
+
+            if start > last_end:
+                result_parts.append(text[last_end:start])
+
+            matched_text = text[start:end]
+            if len(matched_text.strip()) > 0:
+                result_parts.append(f"【{matched_text}】")
+
+            last_end = end
+
+        if last_end < len(text):
+            result_parts.append(text[last_end:])
+
+        return ''.join(result_parts)
+
+    def clear_cache(self) -> None:
+        """清空所有缓存数据（谨慎使用）"""
+        with self.transaction() as conn:
+            tables = ['paragraph_matches', 'pairwise_results', 'candidate_pairs',
+                      'paragraphs', 'chunks', 'documents', 'pipeline_state']
+            for table in tables:
+                conn.execute(f"DELETE FROM {table}")
+        logger.warning("缓存已清空")
+
+    def vacuum(self) -> None:
+        """压缩数据库文件"""
+        self.conn.execute("PRAGMA optimize")
+        self.conn.execute("VACUUM")
+        logger.info("数据库已压缩优化")
+
+    def close(self) -> None:
+        """关闭数据库连接"""
+        self.conn.close()
+        logger.info("SQLite 缓存已关闭")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False

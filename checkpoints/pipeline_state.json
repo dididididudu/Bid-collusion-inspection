@@ -1,0 +1,20 @@
+{
+  "phase": 5,
+  "completed_pairs": 3,
+  "total_pairs": 3,
+  "processed_files": [
+    "test_data/input\\数据分析研判技术方案-20231221-v1.pdf",
+    "test_data/input\\数据分析研判技术方案-20231221-v3.pdf",
+    "test_data/input\\v4.pdf"
+  ],
+  "completed_pair_ids": [
+    "38e360addbf6b2a4::bb90555ec3156bf2",
+    "38e360addbf6b2a4::3ebc78b753b71248",
+    "3ebc78b753b71248::bb90555ec3156bf2"
+  ],
+  "start_time": "2026-07-01T14:04:29.564958",
+  "config_hash": "21cde3b57080",
+  "input_hash": "34e60235acf480e194abeee16f177e09",
+  "version": 2,
+  "updated_at": "2026-07-01T14:06:16.832096"
+}

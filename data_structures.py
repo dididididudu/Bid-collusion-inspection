@@ -2,9 +2,13 @@
 核心数据结构定义
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set, Tuple
 from datetime import datetime
 
+
+# ============================================================
+# 基础特征数据结构
+# ============================================================
 
 @dataclass
 class MetadataFeature:
@@ -29,16 +33,33 @@ class QuoteSignature:
     std: float = 0.0
 
 
+# ============================================================
+# 文档特征 (轻量化版本)
+# ============================================================
+
 @dataclass
 class BidFeature:
-    """单文档特征"""
+    """单文档特征（轻量化描述符）
+
+    流式模式下：
+      - text_content, paragraphs, paragraph_hashes 存储在 SQLite 中，此处为空
+      - 新增 page_count, doc_minhash, chunk_count 用于快速筛选
+
+    非流式模式下（向后兼容）：
+      - 所有字段行为与之前一致
+    """
     doc_id: str
     filename: str
     file_size: int
-    text_content: str
-    text_length: int
-    text_simhash: str  # 64位字符串
+
+    # === 文本内容 (旧版：内存存储；流式：为空，从 SQLite 惰性加载) ===
+    text_content: str = ""
+    text_length: int = 0
+    text_simhash: str = ""  # 64位十六进制字符串
+    paragraphs: List[str] = field(default_factory=list)
     paragraph_hashes: List[str] = field(default_factory=list)
+
+    # === 元数据与提取信息 ===
     metadata: MetadataFeature = field(default_factory=MetadataFeature)
     quotes: List[float] = field(default_factory=list)
     quote_signature: QuoteSignature = field(default_factory=QuoteSignature)
@@ -46,6 +67,67 @@ class BidFeature:
     extracted_at: str = field(default_factory=lambda: datetime.now().isoformat())
     is_scanned: bool = False  # 是否为扫描版
 
+    # === 新增：流式模式字段 ===
+    page_count: int = 0  # PDF 总页数
+    doc_minhash: Optional[List[int]] = None  # 聚合所有段落的 MinHash 签名（128 维）
+    chunk_count: int = 0  # 文本块数量
+
+
+# ============================================================
+# 流式处理专用数据结构
+# ============================================================
+
+@dataclass
+class ChunkMetadata:
+    """文本块轻量描述符（仅元数据，不含文本内容）
+
+    文本内容存储在 SQLite 中，按需通过 storage_key 加载。
+    """
+    doc_id: str
+    chunk_index: int  # 块序号（从 0 开始）
+    start_page: int  # 起始页码（0-based）
+    end_page: int  # 结束页码（0-based，含）
+    text_length: int  # 字符数
+    simhash: str = ""  # 该块的 SimHash
+    paragraph_count: int = 0  # 块内段落数
+
+
+@dataclass
+class ChunkResult:
+    """单个文本块处理的结果"""
+    doc_id: str
+    chunk_index: int
+    start_page: int
+    end_page: int
+    text: str  # 块内完整文本
+    paragraphs: List[str] = field(default_factory=list)
+    paragraph_hashes: List[str] = field(default_factory=list)
+    simhash: str = ""
+    quotes: List[float] = field(default_factory=list)
+    image_hashes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CheckpointState:
+    """可序列化的管道进度状态
+
+    用于断点续传，每个阶段结束时写入检查点文件。
+    Phase 3（分析阶段）每 N 对增量写入。
+    """
+    phase: int = 0  # 当前完成的阶段编号 (0-5)
+    completed_pairs: int = 0  # 已完成分析的对数
+    total_pairs: int = 0  # 候选总对数
+    processed_files: Set[str] = field(default_factory=set)  # Phase 1 已处理的文件
+    completed_pair_ids: Set[str] = field(default_factory=set)  # Phase 3 已完成的对
+    start_time: str = ""  # 管道启动时间
+    config_hash: str = ""  # 配置哈希（检测配置漂移）
+    input_hash: str = ""  # 输入文件夹内容哈希（检测文件变化）
+    version: int = 3  # 检查点格式版本
+
+
+# ============================================================
+# 段落匹配与证据
+# ============================================================
 
 @dataclass
 class ParagraphMatch:
@@ -55,7 +137,7 @@ class ParagraphMatch:
     paragraph_b: str = ""
     paragraph_a_index: int = 0
     paragraph_b_index: int = 0
-    detection_method: str = ""  # SequenceMatcher / SBERT
+    detection_method: str = ""  # SequenceMatcher / SBERT / MinHash-Jaccard
     is_continuous_clone: bool = False  # 是否属于连续克隆块
     continuous_clone_group_id: str = ""  # 连续克隆块组ID
     highlighted_text_a: str = ""  # 标记重复部分后的文本A
@@ -94,6 +176,10 @@ class EvidenceChain:
     metadata_evidence: MetadataEvidence = field(default_factory=MetadataEvidence)
     image_evidence: ImageEvidence = field(default_factory=ImageEvidence)
 
+
+# ============================================================
+# 检测结果
+# ============================================================
 
 @dataclass
 class PairwiseResult:
@@ -141,3 +227,4 @@ class GlobalReport:
     pairwise_results: List[PairwiseResult] = field(default_factory=list)
     file_profiles: Dict[str, FileProfile] = field(default_factory=dict)
     error_log: List[str] = field(default_factory=list)
+    single_doc_risks: Dict[str, str] = field(default_factory=dict)  # 单文档风险等级

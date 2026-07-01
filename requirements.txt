@@ -9,3 +9,11 @@ python-dateutil>=2.8.2
 sentence-transformers>=2.2.0
 torch>=1.9.0
 transformers>=4.20.0
+
+# === 新增：流式处理依赖 ===
+PyMuPDF>=1.23.0           # 高速 PDF 解析 (fitz)，替代 pdfplumber
+datasketch>=1.6.0          # 专业 MinHash LSH 实现
+
+# === 可选：GPU/ONNX 加速 ===
+# optimum[onnxruntime]>=1.12.0  # ONNX Runtime GPU 加速（可选，需手动安装）
+# onnxruntime-gpu>=1.15.0       # CUDA GPU 推理（可选）

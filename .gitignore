@@ -24,6 +24,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+cache/
 
 # 测试和报告
 test_data/
