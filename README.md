@@ -4,320 +4,150 @@
 
 ## 系统概述
 
-BatchBidCollusionDetector 是一个用于检测投标文件中串标、围标行为的自动化分析系统。系统通过对多个PDF投标文件进行批量特征提取、相似度计算、风险评级和聚类分析，自动识别可疑的串标围标行为。
+自动检测投标文件中的串标、围标行为。支持两种运行模式：
 
-## 核心功能
+- **传统模式**：适合少量小文件（10-30个，<200页），全量加载到内存
+- **流式模式**：适合大量大文件（100+个，1000+页），低内存占用，支持断点续传
 
-- **文档解析与特征提取**: 并行提取PDF文件的文本、元数据、报价、图片指纹等特征
-- **智能初筛**: 使用SimHash/MinHash/LSH技术快速筛选可疑文档对，降低计算复杂度
-- **两层相似度检测**: SequenceMatcher预过滤 + SBERT语义验证，精准识别改写、同义词替换等隐蔽抄袭
-- **连续克隆块检测**: 识别超过3个连续段落雷同的克隆块，标记为高风险
-- **风险评级**: 基于混合评分模型的风险评分算法，自动判定风险等级
-- **聚类分析**: 发现围标团伙，生成风险聚类
-- **单文档风险评估**: 对每个文档进行独立风险评级，存在高相似文档即判定为高风险
-- **报告生成**: 输出JSON、文本摘要和CSV格式的检测报告，清晰展示相似内容
-
-## 系统架构
-
-系统分为5个核心模块：
-
-### 模块A - 文档解析与特征提取引擎 (`extractor.py`)
-- 并行读取PDF文件
-- 提取文本、元数据、报价、图片哈希
-- 生成SimHash、MinHash等特征向量
-- 文本噪声清洗（移除目录虚线、页码、纯符号行）
-
-### 模块B - 快速初筛引擎 (`selector.py`)
-- SimHash汉明距离初筛
-- LSH桶分桶
-- 元数据和图片哈希倒排索引
-
-### 模块C - 精细相似度计算引擎 (`analyzer.py`)
-- **两层检测流程**: SequenceMatcher预过滤 + SBERT语义验证
-- **混合评分策略**: 质量分数 × 覆盖率衰减因子
-- **连续克隆块检测**: 识别超过3个连续相似段落
-- 元数据关联分析
-- 报价规律检测
-- 图片重复检测
-
-### 模块D - 风险评级与聚类引擎 (`scoring.py`)
-- 多维度风险评分
-- 覆盖率门限检查（避免少量相似段落误判高风险）
-- 风险等级判定
-- 图聚类分析（连通分量）
-
-### 模块E - 报告生成引擎 (`report.py`)
-- JSON完整报告
-- 文本摘要报告（含单文档风险评估）
-- CSV可疑对列表
-
-## 核心算法与计算方式
-
-### 1. 两层相似度检测流程
-
-```
-段落比对流程：
-┌─────────────────────────────────────────────────────────────┐
-│  段落A + 段落B                                              │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  SequenceMatcher预过滤（快速文本相似度计算）                   │
-│  ├── similarity > 0.85  → 直接判定高相似                    │
-│  ├── similarity < 0.4   → 直接判定低相似                    │
-│  └── 0.4 ≤ similarity < 0.85 → 进入SBERT验证               │
-└─────────────────────────────────────────────────────────────┘
-                            │ (需验证)
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  SBERT语义验证（深度学习语义匹配）                            │
-│  ├── 动态阈值调整：                                          │
-│  │   - 短段落（<100字符）：阈值 0.85                        │
-│  │   - 正常段落：阈值 0.75                                  │
-│  │   - 候选数量>100：阈值上调0.02                           │
-│  │   - 候选数量<10：阈值下调0.02                            │
-│  └── similarity > 阈值 → 判定高相似                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 2. 混合评分策略（乘法模型）
-
-**质量分数计算：**
-```
-quality_score = (SCORE_WEIGHT_MAX × max_sim) + 
-                (SCORE_WEIGHT_TOP_K × top_k_sim) + 
-                (SCORE_WEIGHT_MEAN × mean_sim)
-
-其中：
-- max_sim: 所有匹配段落的最大相似度
-- top_k_sim: 前K个最高相似度的平均值（K=5）
-- mean_sim: 所有匹配段落的平均相似度
-- 默认权重: max(40%) + top_k(30%) + mean(20%) = 90%
-```
-
-**覆盖率衰减因子：**
-```
-coverage_factor = 1 - exp(-5 × coverage)
-
-其中：
-coverage = (covered_paras_a + covered_paras_b) / total_paras
-- covered_paras_a: 文档A中被覆盖的段落数
-- covered_paras_b: 文档B中被覆盖的段落数
-- total_paras: 两文档总段落数
-```
-
-**综合相似度：**
-```
-mixed_score = quality_score × coverage_factor
-```
-
-### 3. 风险等级判定规则
-
-```
-判定流程：
-┌─────────────────────────────────────────────────────────────┐
-│  text_local ≥ 0.75                                          │
-│  ├── coverage ≥ 0.1 且 match_count ≥ 5 → HIGH（高风险）      │
-│  └── coverage < 0.1 或 match_count < 5 → MEDIUM（中等风险） │
-├─────────────────────────────────────────────────────────────┤
-│  text_local < 0.75 → LOW（低风险）                           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 4. 连续克隆块检测
-
-```
-连续克隆块定义：
-- 连续3个及以上段落相似度 > 0.85
-- 允许最大间隔1个段落
-- 每个克隆块标记组ID和长度
-```
-
-### 5. 单文档风险评估
-
-```
-单文档风险评级：
-- 该文档存在至少一个高相似文档 → 高风险 🔴
-- 该文档存在中等相似文档但无高相似 → 低风险 🟡
-- 该文档无任何相似文档 → 无风险 🟢
-```
-
-### 6. 文本噪声清洗规则
-
-```
-清洗规则（预处理阶段）：
-1. 移除目录虚线行（包含5个以上连续的点/省略号）
-2. 移除纯页码行（仅数字）
-3. 移除纯符号行（不含中文字符且长度<20）
-```
-
-## 安装依赖
+## 快速开始
 
 ```bash
+# 安装依赖
 pip install -r requirements.txt
-```
 
-首次运行时会自动下载SBERT模型（约400MB），也可手动预下载：
-```python
-from sentence_transformers import SentenceTransformer
-model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-```
-
-## 使用方法
-
-### 基本用法
-
-```bash
+# 传统模式（适合小规模）
 python main.py --input ./bids/ --output ./report/
-```
 
-### 使用自定义配置
+# 流式模式（适合大规模，推荐）
+python main.py --input ./bids/ --output ./report/ --streaming
 
-```bash
-python main.py --input ./bids/ --output ./report/ --config config.json
-```
+# 启用 GPU 加速
+python main.py --input ./bids/ --output ./report/ --streaming --gpu
 
-### 调整日志级别
-
-```bash
-python main.py --input ./bids/ --output ./report/ --log-level DEBUG
+# 使用自定义配置
+python main.py --input ./bids/ --output ./report/ --streaming --config config.json
 ```
 
 ## 命令行参数
 
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `--input` | str | 是 | 输入PDF文件目录路径 |
-| `--output` | str | 是 | 输出报告目录路径 |
-| `--config` | str | 否 | 配置文件路径（JSON格式） |
-| `--log-level` | str | 否 | 日志级别（默认INFO，可选DEBUG/INFO/WARNING/ERROR） |
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--input` | 输入 PDF 目录（必需） | — |
+| `--output` | 输出报告目录（必需） | — |
+| `--config` | JSON 配置文件路径 | — |
+| `--log-level` | 日志级别: DEBUG/INFO/WARNING/ERROR | INFO |
+| `--streaming` | 启用流式管道（适合大量大文件） | False |
+| `--gpu` | 启用 GPU 加速（CUDA/MPS） | False |
+| `--no-checkpoint` | 禁用断点续传 | False |
 
-## 配置参数
+## 系统架构
 
-系统支持通过JSON配置文件自定义检测参数。配置文件示例：
-
-```json
-{
-  "TEXT_GLOBAL_THRESHOLD": 0.85,
-  "TEXT_LOCAL_THRESHOLD": 0.92,
-  "TYPO_MIN_LENGTH": 4,
-  
-  "SCORE_WEIGHT_MAX": 0.4,
-  "SCORE_WEIGHT_TOP_K": 0.3,
-  "SCORE_WEIGHT_MEAN": 0.2,
-  "SCORE_TOP_K": 5,
-  
-  "SBERT_BASE_THRESHOLD": 0.75,
-  "SBERT_SHORT_PARAGRAPH_THRESHOLD": 0.85,
-  "SBERT_SHORT_PARAGRAPH_LEN": 100,
-  
-  "CLONE_BLOCK_MIN_LENGTH": 3,
-  "CLONE_BLOCK_MAX_GAP": 1,
-  
-  "METADATA_MATCH_THRESHOLD": 3,
-  "QUOTE_COMMON_THRESHOLD": 2,
-  "IMAGE_COMMON_THRESHOLD": 1,
-  
-  "RISK_HIGH_THRESHOLD": 70,
-  "RISK_MEDIUM_THRESHOLD": 40,
-  "RISK_LOW_THRESHOLD": 15,
-  
-  "MAX_WORKERS": 8,
-  "MAX_CANDIDATE_PAIRS": 5000,
-  "MAX_TEXT_LENGTH": 100000
-}
+```
+输入PDF → Phase0扫描 → Phase1提取 → Phase2筛选 → Phase3分析 → Phase4评分 → Phase5报告
 ```
 
-### 配置参数详细说明
+### 模块结构
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `TEXT_GLOBAL_THRESHOLD` | 0.85 | SBERT全局语义相似度阈值 |
-| `TEXT_LOCAL_THRESHOLD` | 0.92 | 段落级相似度阈值 |
-| `SCORE_WEIGHT_MAX` | 0.4 | 最大相似度权重 |
-| `SCORE_WEIGHT_TOP_K` | 0.3 | Top-K相似度权重 |
-| `SCORE_WEIGHT_MEAN` | 0.2 | 平均相似度权重 |
-| `SCORE_TOP_K` | 5 | Top-K取前K个 |
-| `SBERT_BASE_THRESHOLD` | 0.75 | SBERT基础阈值 |
-| `SBERT_SHORT_PARAGRAPH_THRESHOLD` | 0.85 | 短段落SBERT阈值 |
-| `SBERT_SHORT_PARAGRAPH_LEN` | 100 | 短段落长度阈值 |
-| `CLONE_BLOCK_MIN_LENGTH` | 3 | 最小连续克隆块长度 |
-| `CLONE_BLOCK_MAX_GAP` | 1 | 允许的最大间隔 |
-| `MAX_WORKERS` | 8 | 并行进程数 |
-| `MAX_TEXT_LENGTH` | 100000 | 文本长度限制（防止内存溢出） |
+```
+├── main.py                     # 入口，支持传统/流式双模式
+├── config.py                   # 配置参数（20+可调参数）
+├── data_structures.py          # 数据结构定义
+├── analyzer.py                 # 传统模式分析器（保留向后兼容）
+├── selector.py                 # 传统模式选择器
+├── extractor.py                # 传统模式提取器（pdfplumber）
+├── scoring.py                  # 风险评分引擎
+├── report.py                   # 报告生成（HTML/JSON/CSV/TXT）
+│
+├── extraction/                 # 流式 PDF 处理模块
+│   ├── base.py                 #   提取器抽象基类
+│   ├── pdf_extractor.py        #   PyMuPDF 高速解析（10x加速）
+│   ├── text_processor.py       #   分块分词 + 聚合哈希
+│   └── feature_cache.py        #   SQLite 持久化存储
+│
+├── matching/                   # 流式相似度比对模块
+│   ├── selector.py             #   datasketch MinHashLSH 候选筛选
+│   ├── lsh_index.py            #   文档/段落级 LSH 索引
+│   ├── paragraph_matcher.py    #   三阶段匹配引擎
+│   └── semantic_matcher.py     #   GPU/ONNX SBERT 推理
+│
+└── pipeline/                   # 流式编排模块
+    ├── orchestrator.py         #   5 阶段管道管理
+    ├── checkpoint.py           #   断点续传
+    └── streaming_context.py    #   LRU 内存管理
+```
+
+### 三阶段匹配引擎
+
+```
+阶段1: MinHash Jaccard 向量化筛选
+  100K 句子对 → ~3000 候选 (numpy 广播，100x 加速)
+
+阶段2a: 精确单词 Jaccard (jieba 分词)
+  ≥0.75 → 确认为匹配（完全相同/高度相同）
+  0.15-0.75 → 进入 SBERT 验证
+
+阶段2b: SBERT 语义验证
+  识别改写/同义词替换等隐蔽相似
+```
+
+## 流式模式 vs 传统模式
+
+| 特性 | 传统模式 | 流式模式 |
+|------|----------|----------|
+| PDF 解析引擎 | pdfplumber | PyMuPDF (fitz) |
+| 解析速度 | ~0.5-2s/页 | ~0.006s/页 (100-300x) |
+| 文本截断 | 10万字符 | 无截断 |
+| 内存占用 | ~500MB (30文档) | ~80MB |
+| 候选筛选 | SimHash O(n²) | datasketch LSH O(n) |
+| 图片提取 | 嵌入图片 | 嵌入图片 + 页面渲染 |
+| 文本切分粒度 | 段落级 (30-2000字) | 句子级 (15-500字) |
+| 断点续传 | ❌ | ✅ |
+| GPU 加速 | ❌ | ✅ CUDA/MPS/ONNX |
+| 扫描版支持 | 跳过 | 页级图片哈希比对 |
 
 ## 输出报告
 
-系统会在输出目录生成以下文件：
+系统在输出目录生成 4 种格式：
 
-### 1. detection_report.json
-完整的检测报告（JSON格式），包含所有检测数据和证据链
+| 文件 | 说明 |
+|------|------|
+| `detection_report.html` | HTML 可视化报告，高亮相似文本 |
+| `detection_report.json` | 完整 JSON 数据 |
+| `summary.txt` | 文本摘要（含单文档风险评估） |
+| `suspicious_pairs.csv` | 可疑对 CSV 列表 |
 
-### 2. summary.txt
-文本摘要报告，包含：
-- 总体统计信息
-- 风险聚类结果
-- 高风险对详情（含相似段落标记）
-- 单文档风险评估
+## 配置参数
 
-### 3. suspicious_pairs.csv
-可疑文档对列表（CSV格式），可用Excel打开
+完整配置见 `config.example.json`。关键参数：
 
-## 风险等级说明
+```json
+{
+  "STREAMING_MODE": false,
+  "CHUNK_PAGE_SIZE": 50,
+  "ENABLE_CHECKPOINT": true,
+  "USE_GPU": false,
+  "SBERT_DEVICE": "cpu",
+  "MINHASH_LSH_THRESHOLD": 0.3,
+  "PARAGRAPH_MIN_JACCARD": 0.05,
+  "SBERT_BASE_THRESHOLD": 0.60,
+  "PDF_EXTRACTOR_BACKEND": "pymupdf",
+  "MAX_WORKERS": 8
+}
+```
 
-| 等级 | 条件 | 说明 |
-|------|------|------|
-| **HIGH** | text_local ≥ 0.75 且 coverage ≥ 0.1 且 match_count ≥ 5 | 存在明显的串标围标特征 |
-| **MEDIUM** | text_local ≥ 0.75 但 coverage < 0.1 或 match_count < 5 | 存在可疑特征但覆盖率不足 |
-| **LOW** | text_local < 0.75 | 存在少量可疑特征 |
+### 阈值调优建议
 
-## 检测维度
-
-### 1. 文本相似度
-- **SequenceMatcher预过滤**: 快速文本相似度计算，过滤70%低相似对
-- **SBERT语义验证**: 深度学习模型理解文本含义，识别改写、同义词替换
-- **连续克隆块**: 检测超过3个连续相似段落
-- **相似段落标记**: 使用高亮标记重复内容
-
-### 2. 元数据关联
-- 作者、创建软件、生成时间等元数据的匹配度
-- 时间桶分析（按小时分组）
-
-### 3. 报价规律
-- 共同金额、尾数分布、固定差额/比例规律
-
-### 4. 图片重复
-- 嵌入图片的感知哈希（pHash）匹配
-
-## 技术特点
-
-- **高性能**: SequenceMatcher预过滤减少70%的SBERT调用
-- **并行化**: 段落比对使用ThreadPoolExecutor并行处理
-- **高精度**: 乘法评分模型综合考虑质量和覆盖率
-- **鲁棒性**: 噪声清洗（目录虚线、页码等）避免误判
-- **可解释**: 生成详细的证据链，每个风险判定都有明确依据
-- **可配置**: 所有阈值参数可通过配置文件调整
-- **日志轮转**: 自动日志轮转（10MB/文件，保留3个备份）
+| 场景 | 建议 |
+|------|------|
+| 提高召回率 | 降低 `SBERT_BASE_THRESHOLD` (0.50-0.55)，降低 `PARAGRAPH_MIN_JACCARD` (0.03) |
+| 降低误报率 | 提高 `SBERT_BASE_THRESHOLD` (0.70+)，提高 `CLONE_BLOCK_MIN_LENGTH` (5) |
+| GPU 加速 | `--gpu` 或设置 `SBERT_DEVICE: "cuda"` |
+| 超大文件 | 增大 `CHUNK_PAGE_SIZE` (100)，减少 `MAX_CHUNKS_IN_MEMORY` (3) |
 
 ## 系统要求
 
 - Python 3.7+
-- 处理对象：普通文本型PDF（可直接提取字符）
-- 扫描版PDF仅参与元数据和图片比对
+- 文本型 PDF（可直接提取字符）优先
+- 扫描版 PDF 使用图片比对
+- 首次运行自动下载 SBERT 模型（~400MB），存放于 `models/` 目录
 
-## 注意事项
-
-1. 扫描版PDF（无法提取文本）仅参与元数据和图片比对
-2. 单文件大小建议不超过100MB
-3. 文档数量N>500时，建议调整MAX_CANDIDATE_PAIRS参数
-4. 首次运行会下载jieba分词词典和SBERT模型（约400MB）
-5. 模型文件存放在`models/`目录，已排除在版本控制之外
-
-## 许可证
-
-本项目仅供学习研究使用。
-
-## 作者
-
-BatchBidCollusionDetector Development Team
