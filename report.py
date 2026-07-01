@@ -1,10 +1,11 @@
 """
-模块 E：报告生成引擎（改进版）
+模块 E：报告生成引擎
 - 输出完整段落内容
 - 高亮标记相似部分
 - 生成HTML可视化报告
 """
 import os
+import re
 import json
 import logging
 from typing import Dict, Any
@@ -33,9 +34,9 @@ class ReportGenerator:
         self._generate_summary_report(report, output_dir)
 
         # 3. 生成CSV表格
-        self._generate_csv_report(report, output_dir)
+        # self._generate_csv_report(report, output_dir)
 
-        # 4. 生成HTML可视化报告（新增）
+        # 4. 生成HTML可视化报告
         self._generate_html_report(report, output_dir)
 
         logger.info(f"报告已生成到: {output_dir}")
@@ -345,10 +346,12 @@ class ReportGenerator:
         logger.info(f"HTML报告已生成: {html_path}")
 
     def _build_html_content(self, report: GlobalReport, results: list) -> str:
-        """构建HTML报告内容 — 突出显示完整相似文本内容"""
+        """构建HTML报告内容 — 使用 list+join 避免 O(n^2) 字符串拼接"""
         risk_colors = {"HIGH": "#e74c3c", "MEDIUM": "#f39c12", "LOW": "#3498db", "NONE": "#95a5a6"}
 
-        html = f"""<!DOCTYPE html>
+        parts = []  # 使用列表收集片段，最后一次性 join
+
+        parts.append(f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -406,24 +409,25 @@ summary:hover {{ background: #bbdefb; }}
 
 <div class="file-profiles">
 <h2 style="width:100%;margin-bottom:10px;">📁 文件风险画像</h2>
-"""
+""")
 
         for doc_id, profile in report.file_profiles.items():
             risk_color = risk_colors.get(profile.max_risk_level, "#95a5a6")
             risk_emoji = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡", "NONE": "🟢"}.get(profile.max_risk_level, "🟢")
-            html += f"""
+            parts.append(f"""
 <div class="file-profile">
 <h3>{profile.filename}</h3>
 <div class="risk" style="color:{risk_color};">{risk_emoji} {profile.max_risk_level}</div>
 <div style="font-size:13px;color:#7f8c8d;">关联可疑数: {profile.related_suspicious_count}</div>
-</div>"""
+</div>""")
 
-        html += "</div>"
+        parts.append("</div>")
 
         # === 相似文档对详情 ===
         if results:
-            html += "<h2 style='margin-bottom:15px;'>🔍 相似文档对详情（完整相似内容）</h2>"
+            parts.append("<h2 style='margin-bottom:15px;'>🔍 相似文档对详情（完整相似内容）</h2>")
 
+            total_pairs = len(results)
             for i, result in enumerate(results, 1):
                 profile_a = report.file_profiles.get(result.doc_a_id)
                 profile_b = report.file_profiles.get(result.doc_b_id)
@@ -437,7 +441,7 @@ summary:hover {{ background: #bbdefb; }}
                 para_matches = evidence.text_evidence.paragraph_matches
                 clone_blocks = evidence.text_evidence.continuous_clone_blocks
 
-                html += f"""
+                parts.append(f"""
 <div class="result-card">
 <h2>#{i} {filename_a} ↔ {filename_b}</h2>
 <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
@@ -446,10 +450,10 @@ summary:hover {{ background: #bbdefb; }}
 <div><strong>⚠ 风险评级:</strong> <span class="risk-badge" style="background:{risk_color};">{result.risk_level}</span></div>
 <div><strong>🔗 相似段落:</strong> {len(para_matches)} 对</div>
 <div><strong>📎 克隆块:</strong> {len(clone_blocks)} 个</div>
-</div>"""
+</div>""")
 
                 if not para_matches:
-                    html += "<p>（无相似段落详情）</p></div>"
+                    parts.append("<p>（无相似段落详情）</p></div>")
                     continue
 
                 # 按相似度排序
@@ -463,7 +467,7 @@ summary:hover {{ background: #bbdefb; }}
 
                 # === 连续克隆块展示 ===
                 if clone_blocks:
-                    html += "<div class='section-title'>⚠ 连续克隆块 — 连续雷同段落（最强围标证据）</div>"
+                    parts.append("<div class='section-title'>⚠ 连续克隆块 — 连续雷同段落（最强围标证据）</div>")
 
                     for block in clone_blocks:
                         block_id = block.get('group_id', '?')
@@ -477,16 +481,16 @@ summary:hover {{ background: #bbdefb; }}
                             if (m.get('paragraph_a_index'), m.get('paragraph_b_index')) in block_pairs_keys
                         ]
 
-                        html += f"""
+                        parts.append(f"""
 <div class="clone-block">
 <strong>克隆块 [{block_id}]</strong> |
 连续 <strong>{block_len}</strong> 段雷同 |
 平均相似度: <strong>{block_sim:.4f}</strong><br>
 <strong>段落序列:</strong> {', '.join(f'A[{p["a_index"]}]↔B[{p["b_index"]}]' for p in block.get('pairs', []))}
-</div>"""
+</div>""")
 
                         for bm in block_matches:
-                            html += self._build_match_html(bm, filename_a, filename_b, is_clone=True)
+                            parts.append(self._build_match_html(bm, filename_a, filename_b, is_clone=True))
 
                 # === 其他独立相似段落 ===
                 non_clone_matches = [
@@ -495,22 +499,25 @@ summary:hover {{ background: #bbdefb; }}
                 ]
 
                 if non_clone_matches:
-                    html += f"<div class='section-title'>📝 其他相似段落（共 {len(non_clone_matches)} 对）</div>"
+                    parts.append(f"<div class='section-title'>📝 其他相似段落（共 {len(non_clone_matches)} 对）</div>")
 
                     for nm in non_clone_matches:
-                        html += self._build_match_html(nm, filename_a, filename_b, is_clone=False)
+                        parts.append(self._build_match_html(nm, filename_a, filename_b, is_clone=False))
 
-                html += "</div>"
+                parts.append("</div>")
 
-        html += """
+                # 进度日志（每处理完一对输出）
+                logger.info(f"HTML报告生成进度: {i}/{total_pairs} 对")
+
+        parts.append("""
 <div class="footer">
 <p>本报告由 投标文件串标围标检测系统 自动生成 | 结果仅供参考，请结合人工审核</p>
 </div>
 </div>
 </body>
-</html>"""
+</html>""")
 
-        return html
+        return ''.join(parts)
 
     def _build_match_html(self, match: dict, filename_a: str, filename_b: str,
                            is_clone: bool = False) -> str:
@@ -579,14 +586,15 @@ summary:hover {{ background: #bbdefb; }}
                     .replace('>', '&gt;')
                     .replace('"', '&quot;'))
 
+    # 预编译正则，避免每次调用时重新编译
+    _HL_RE = re.compile(r'【(.*?)】')
+
     def _format_highlighted_html(self, text: str) -> str:
         """将【】标记的文本转换为HTML高亮格式"""
-        import re
-
         # 先转义HTML
         text = self._escape_html(text)
 
-        # 将【xxx】转换为高亮span
-        text = re.sub(r'【(.*?)】', r'<span class="highlight">\1</span>', text)
+        # 将【xxx】转换为高亮span（使用预编译正则）
+        text = self._HL_RE.sub(r'<span class="highlight">\1</span>', text)
 
         return text

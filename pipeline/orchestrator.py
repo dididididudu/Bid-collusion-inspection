@@ -1,11 +1,12 @@
 """
-5 阶段流式管道编排器
+6 阶段流式管道编排器 (v2)
 
 管理完整的检测流程:
   Phase 0: SCAN    - 扫描目录，收集 PDF 元数据
-  Phase 1: EXTRACT - 分块文本提取（PyMuPDF）
-  Phase 2: SELECT  - 候选对筛选（datasketch LSH）
-  Phase 3: ANALYZE - 逐对精细分析（流式）
+  Phase 1: EXTRACT - 多进程分块文本提取（PyMuPDF）
+  Phase 1.5: EMBED - 全局 SBERT 嵌入编码（一次性）
+  Phase 2: SELECT  - 候选对筛选（LSH + 元数据 + 文档向量预筛）
+  Phase 3: ANALYZE - 逐对精细分析（查表点积，不调模型）
   Phase 4: SCORE   - 风险评分与聚类
   Phase 5: REPORT  - 生成报告
 
@@ -30,6 +31,7 @@ from matching.selector import CandidatePairSelector
 from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.checkpoint import CheckpointManager
 from pipeline.streaming_context import StreamingContext
+from embedding.embedding_engine import EmbeddingEngine
 from scoring import RiskScoringEngine
 from report import ReportGenerator
 
@@ -77,9 +79,17 @@ class BidDetectionOrchestrator:
         logger.info("=" * 60)
 
         if self.config.DISABLE_CACHE:
-            logger.warning("缓存功能已禁用，将清除所有缓存并从头开始处理")
+            logger.info("缓存已禁用，清除旧缓存文件...")
             self.checkpoint.clear()
             self.cache.clear_cache()
+            # 同时删除物理数据库文件，避免残留锁文件干扰
+            for suffix in ['', '-wal', '-shm']:
+                f = self.cache.db_path + suffix
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
 
         # 计算输入文件夹内容哈希（检测文件变化）
         input_hash = self._compute_input_hash(input_dir)
@@ -160,14 +170,18 @@ class BidDetectionOrchestrator:
                     f"耗时 {extract_time:.2f}s"
                 )
 
-            # === Phase 2: SELECT ===
+            # === Phase 1.5: EMBED (全局 SBERT 嵌入编码) ===
             if state.phase < 3:
+                self._phase_embed(state)
+
+            # === Phase 2: SELECT ===
+            if state.phase < 4:
                 logger.info("Phase 2: 候选对选择...")
                 select_start = datetime.now()
 
                 features = self.cache.load_all_documents()
                 self._all_features_cache = features  # 缓存供后续阶段复用
-                candidates = self.selector.select(features)
+                candidates = self.selector.select(features, cache=self.cache)
 
                 # 存入缓存
                 self.cache.store_candidate_pairs(candidates)
@@ -183,7 +197,7 @@ class BidDetectionOrchestrator:
                 )
 
             # === Phase 3: ANALYZE ===
-            if state.phase < 4:
+            if state.phase < 5:
                 logger.info("Phase 3: 精细分析...")
 
                 # 加载已完成的配对（恢复模式）
@@ -244,13 +258,13 @@ class BidDetectionOrchestrator:
                         f"耗时 {analyze_time:.2f}s"
                     )
 
-                state.phase = 4
+                state.phase = 5
                 state.completed_pairs = len(completed_ids)
                 self.checkpoint.save(state)
 
             # === Phase 4: SCORE ===
             report = None
-            if state.phase < 5:
+            if state.phase < 6:
                 logger.info("Phase 4: 风险评分...")
                 score_start = datetime.now()
 
@@ -263,7 +277,7 @@ class BidDetectionOrchestrator:
                     pairwise_results, features
                 )
 
-                state.phase = 5
+                state.phase = 6
                 self.checkpoint.save(state)
 
                 score_time = (datetime.now() - score_start).total_seconds()
@@ -274,7 +288,7 @@ class BidDetectionOrchestrator:
                 )
 
             # === Phase 5: REPORT ===
-            if state.phase >= 5 and report is None:
+            if state.phase >= 6 and report is None:
                 # 恢复模式：从缓存重新生成报告
                 pairwise_results = self.cache.load_all_results()
                 features = self._all_features_cache or self.cache.load_all_documents()
@@ -356,6 +370,15 @@ class BidDetectionOrchestrator:
                     chunk_count=0,
                 )
                 self.cache.store_document(feature)
+                # 存储元数据指纹（供 Phase 2 筛选使用）
+                self.cache.store_metadata_fingerprint(
+                    doc_id=doc_id,
+                    author=metadata.author or '',
+                    creator=metadata.creator or '',
+                    producer=metadata.producer or '',
+                    software_fingerprint=metadata.software_fingerprint or '',
+                    time_bucket=metadata.time_bucket or '',
+                )
                 logger.debug(
                     f"Phase 0: {filename} ({page_count} 页, "
                     f"{'扫描版' if is_scanned else '文本版'})"
@@ -517,6 +540,62 @@ class BidDetectionOrchestrator:
     # ============================================================
     # Phase 3: 单对分析
     # ============================================================
+
+    def _phase_embed(self, state) -> None:
+        """Phase 1.5: 全局 SBERT 嵌入编码
+
+        一次性编码所有文档的所有段落嵌入并持久化到 SQLite。
+        后续 Phase 3 分析只需查表加载嵌入 + 点积，不再调用 SBERT 模型。
+        """
+        logger.info("Phase 1.5: 全局 SBERT 嵌入编码...")
+        embed_start = datetime.now()
+
+        engine = EmbeddingEngine(self.config)
+        if not engine.is_available:
+            logger.warning("SBERT 不可用，跳过 Phase 1.5 嵌入编码")
+            state.phase = 3
+            self.checkpoint.save(state)
+            return
+
+        # 获取所有已提取的文档
+        features = self.cache.load_all_documents()
+        if not features:
+            logger.warning("Phase 1.5: 未找到已提取的文档，跳过嵌入编码")
+            state.phase = 3
+            self.checkpoint.save(state)
+            return
+
+        logger.info(f"Phase 1.5: 准备编码 {len(features)} 个文档的段落嵌入")
+        total_paragraphs = 0
+
+        for doc_feat in features:
+            if doc_feat.is_scanned:
+                continue
+            try:
+                paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
+                if paragraphs:
+                    count = engine.encode_document(
+                        doc_feat.doc_id, paragraphs, self.cache
+                    )
+                    total_paragraphs += count
+                else:
+                    logger.debug(
+                        f"Phase 1.5: {doc_feat.filename} 无段落文本，跳过"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"嵌入编码失败 ({doc_feat.filename}): {e}", exc_info=True
+                )
+                continue
+
+        state.phase = 3
+        self.checkpoint.save(state)
+
+        embed_time = (datetime.now() - embed_start).total_seconds()
+        logger.info(
+            f"Phase 1.5 完成: {total_paragraphs} 个段落已编码, "
+            f"耗时 {embed_time:.2f}s"
+        )
 
     def _phase3_analyze_single(self, doc_a_id: str, doc_b_id: str):
         """Phase 3: 分析单个文档对（流式加载文本）"""

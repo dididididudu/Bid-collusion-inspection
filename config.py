@@ -81,6 +81,16 @@ class DetectionConfig:
 
     MAX_MEMORY_MB: int = 2048
 
+    # 嵌入缓存
+    ENABLE_EMBEDDING_CACHE: bool = True  # 全局 SBERT 嵌入缓存（Phase 1.5）
+    EMBEDDING_DIM: int = 384  # SBERT 嵌入维度
+    EMBED_WORKERS: int = 1  # Phase 1.5 编码工作进程数（模型大，少 worker）
+
+    # 文档级向量预筛
+    DOC_VECTOR_FILTER_ENABLED: bool = True
+    DOC_VECTOR_THRESHOLD: float = 0.3  # 文档余弦相似度阈值
+    METADATA_FILTER_ENABLED: bool = True  # 元数据指纹候选筛选
+
     DISABLE_CACHE: bool = True
 
     def __post_init__(self):

@@ -597,10 +597,13 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
         for w in unique_words:
             cached = word_hash_cache.get(w)
-            if cached:
-                for i in range(num_hashes):
-                    if cached[i] < values[i]:
-                        values[i] = cached[i]
+            if cached is None:
+                # 缓存未命中（jieba 上下文相关分词可能导致）：实时计算
+                cached = [hash_func(w) for hash_func in self._minhash_funcs]
+                word_hash_cache[w] = cached  # 回填缓存
+            for i in range(num_hashes):
+                if cached[i] < values[i]:
+                    values[i] = cached[i]
 
         return ','.join(map(str, values))
 

@@ -343,3 +343,103 @@ class SemanticMatcher:
         )
 
         return results
+
+    def score_pairs_from_cache(
+        self,
+        candidates: List[Tuple[int, int, float]],
+        para_texts_a: Dict[int, str],
+        para_texts_b: Dict[int, str],
+        cache,
+        doc_a_id: str = '',
+        doc_b_id: str = '',
+    ) -> List[Dict]:
+        """从预计算嵌入缓存评分（Phase 3 查表模式，不调 SBERT 模型）
+
+        与 score_pairs 不同，此方法从 SQLite 加载预计算的嵌入向量，
+        而不是实时调用 SBERT 编码。适用于 Phase 1.5 已编码所有段落后的场景。
+
+        Args:
+            candidates: [(para_a_index, para_b_index, jaccard_sim), ...]
+            para_texts_a: {para_index: text}
+            para_texts_b: {para_index: text}
+            cache: DocumentCache 实例
+
+        Returns:
+            与 score_pairs 相同格式的匹配列表
+        """
+        if not candidates:
+            return []
+
+        # 收集所有需要嵌入的段落索引
+        all_a_indices = set()
+        all_b_indices = set()
+        for i, j, _ in candidates:
+            if i in para_texts_a:
+                all_a_indices.add(i)
+            if j in para_texts_b:
+                all_b_indices.add(j)
+
+        # 批量从 SQLite 加载预计算嵌入（关键：不调模型）
+        embs_a = cache.load_paragraph_embeddings(
+            doc_a_id, list(all_a_indices)
+        ) if all_a_indices and doc_a_id else {}
+        embs_b = cache.load_paragraph_embeddings(
+            doc_b_id, list(all_b_indices)
+        ) if all_b_indices and doc_b_id else {}
+
+        # 自适应阈值
+        n_candidates = len(candidates)
+        if n_candidates > 300:
+            base_threshold_adj = 0.03
+        elif n_candidates < 30:
+            base_threshold_adj = -0.03
+        else:
+            base_threshold_adj = 0.0
+
+        results = []
+        for i, j, jaccard_sim in candidates:
+            emb_a = embs_a.get(i)
+            emb_b = embs_b.get(j)
+            if emb_a is None or emb_b is None:
+                continue
+
+            # 向量化余弦相似度（纯 numpy 点积，极快）
+            norm_a = np.linalg.norm(emb_a)
+            norm_b = np.linalg.norm(emb_b)
+            if norm_a == 0 or norm_b == 0:
+                continue
+            sim = float(np.dot(emb_a, emb_b) / (norm_a * norm_b))
+
+            # 阈值判断
+            text_a = para_texts_a[i]
+            text_b = para_texts_b[j]
+            avg_len = (len(text_a) + len(text_b)) / 2
+
+            if avg_len < self.config.SBERT_SHORT_PARAGRAPH_LEN:
+                threshold = self.config.SBERT_SHORT_PARAGRAPH_THRESHOLD
+            else:
+                threshold = self.config.SBERT_BASE_THRESHOLD
+
+            threshold = max(0.55, min(0.90, threshold + base_threshold_adj))
+
+            if sim >= threshold:
+                results.append({
+                    'similarity': sim,
+                    'paragraph_a_index': i,
+                    'paragraph_b_index': j,
+                    'detection_method': 'SBERT',
+                    'paragraph_a': text_a,
+                    'paragraph_b': text_b,
+                    'is_continuous_clone': False,
+                    'continuous_clone_group_id': '',
+                    'highlighted_text_a': '',
+                    'highlighted_text_b': '',
+                    'common_parts': [],
+                })
+
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        logger.debug(
+            f"缓存评分完成: {len(candidates)} 候选 → {len(results)} 匹配 "
+            f"(嵌入命中: A={len(embs_a)}, B={len(embs_b)})"
+        )
+        return results

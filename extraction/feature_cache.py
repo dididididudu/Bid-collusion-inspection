@@ -13,6 +13,7 @@ import zlib
 import json
 import sqlite3
 import logging
+import numpy as np
 from typing import List, Dict, Optional, Tuple, Generator, Any
 from datetime import datetime
 from contextlib import contextmanager
@@ -30,7 +31,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2  # v2: 新增 embedding 列、document_embeddings 表、metadata_fingerprints 表
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -97,12 +98,52 @@ class DocumentCache:
 
         if current_version < self.SCHEMA_VERSION:
             self._create_tables(cursor)
+            # v2 迁移：新增嵌入和元数据指纹支持
+            if current_version < 2:
+                self._migrate_v2(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
             )
             self.conn.commit()
             logger.info(f"数据库模式已创建/升级到版本 {self.SCHEMA_VERSION}")
+
+    def _migrate_v2(self, cursor):
+        """v2 迁移：嵌入列 + 新表"""
+        # 段落表增加 embedding 列
+        try:
+            cursor.execute(
+                "ALTER TABLE paragraphs ADD COLUMN embedding BLOB"
+            )
+        except Exception:
+            pass  # 列可能已存在
+
+        # 文档级嵌入表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS document_embeddings (
+                doc_id TEXT PRIMARY KEY,
+                embedding BLOB,
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+            )
+        """)
+
+        # 元数据指纹表（加速 Phase 2 元数据查询）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metadata_fingerprints (
+                doc_id TEXT PRIMARY KEY,
+                author TEXT DEFAULT '',
+                creator TEXT DEFAULT '',
+                producer TEXT DEFAULT '',
+                software_fingerprint TEXT DEFAULT '',
+                time_bucket TEXT DEFAULT '',
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_md_fp "
+            "ON metadata_fingerprints(software_fingerprint, time_bucket)"
+        )
+        logger.info("v2 模式迁移完成：嵌入 + 文档向量 + 元数据指纹")
 
     def _create_tables(self, cursor):
         """创建所有表"""
@@ -498,6 +539,20 @@ class DocumentCache:
         row = cursor.fetchone()
         return row[0] if row else None
 
+    def load_all_paragraphs_text(self, doc_id: str) -> List[str]:
+        """加载文档所有段落的文本（用于全局 SBERT 编码）
+
+        Returns:
+            按 para_index 升序排列的文本列表
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT text FROM paragraphs WHERE doc_id = ? "
+            "AND text IS NOT NULL AND text != '' ORDER BY para_index",
+            (doc_id,)
+        )
+        return [row[0] for row in cursor.fetchall()]
+
     def load_all_paragraph_minhashes(self, doc_id: str) -> Dict[int, str]:
         """加载文档所有段落的 MinHash 签名（用于分析阶段）"""
         cursor = self.conn.cursor()
@@ -534,6 +589,140 @@ class DocumentCache:
         )
         row = cursor.fetchone()
         return row[0] if row[0] else 0
+
+    # ================================================================
+    # 嵌入向量 CRUD（Phase 1.5 全局编码 + Phase 3 查表）
+    # ================================================================
+
+    def store_paragraph_embeddings(
+        self, doc_id: str, para_indices: List[int], embeddings: 'np.ndarray'
+    ) -> None:
+        """批量存储段落 SBERT 嵌入向量（BLOB 序列化）
+
+        Args:
+            doc_id: 文档 ID
+            para_indices: 段落索引列表（需与 embeddings 行对应）
+            embeddings: shape (n_paras, embedding_dim) 的 numpy 数组
+        """
+        data = []
+        for i, para_idx in enumerate(para_indices):
+            blob = embeddings[i].astype(np.float32).tobytes()
+            data.append((blob, doc_id, para_idx))
+        with self.transaction() as conn:
+            conn.executemany(
+                "UPDATE paragraphs SET embedding = ? "
+                "WHERE doc_id = ? AND para_index = ?",
+                data
+            )
+
+    def load_paragraph_embeddings(
+        self, doc_id: str, para_indices: List[int]
+    ) -> Dict[int, 'np.ndarray']:
+        """加载指定段落的嵌入向量
+
+        Returns:
+            {para_index: ndarray(embedding_dim,)}
+        """
+        if not para_indices:
+            return {}
+        cursor = self.conn.cursor()
+        placeholders = ','.join('?' * len(para_indices))
+        cursor.execute(
+            f"SELECT para_index, embedding FROM paragraphs "
+            f"WHERE doc_id = ? AND para_index IN ({placeholders}) "
+            f"AND embedding IS NOT NULL",
+            [doc_id] + list(para_indices)
+        )
+        result = {}
+        for row in cursor.fetchall():
+            blob = row[1]
+            if blob:
+                result[row[0]] = np.frombuffer(blob, dtype=np.float32)
+        return result
+
+    def load_all_paragraph_embeddings(
+        self, doc_id: str
+    ) -> Dict[int, 'np.ndarray']:
+        """加载文档所有段落的嵌入向量"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, embedding FROM paragraphs "
+            "WHERE doc_id = ? AND embedding IS NOT NULL ORDER BY para_index",
+            (doc_id,)
+        )
+        result = {}
+        for row in cursor.fetchall():
+            blob = row[1]
+            if blob:
+                result[row[0]] = np.frombuffer(blob, dtype=np.float32)
+        return result
+
+    def store_document_embedding(self, doc_id: str, embedding: 'np.ndarray') -> None:
+        """存储文档级嵌入向量（段落嵌入均值池化）"""
+        blob = embedding.astype(np.float32).tobytes()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO document_embeddings (doc_id, embedding) "
+            "VALUES (?, ?)",
+            (doc_id, blob)
+        )
+        self.conn.commit()
+
+    def load_all_document_embeddings(self) -> Dict[str, 'np.ndarray']:
+        """加载所有文档级嵌入向量
+
+        Returns:
+            {doc_id: ndarray(embedding_dim,)}
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT doc_id, embedding FROM document_embeddings "
+            "WHERE embedding IS NOT NULL"
+        )
+        result = {}
+        for row in cursor.fetchall():
+            blob = row[1]
+            if blob:
+                result[row[0]] = np.frombuffer(blob, dtype=np.float32)
+        return result
+
+    # ================================================================
+    # 元数据指纹 CRUD（Phase 2 元数据候选筛选）
+    # ================================================================
+
+    def store_metadata_fingerprint(
+        self, doc_id: str, author: str = '', creator: str = '',
+        producer: str = '', software_fingerprint: str = '', time_bucket: str = ''
+    ) -> None:
+        """存储文档元数据指纹"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata_fingerprints "
+            "(doc_id, author, creator, producer, software_fingerprint, time_bucket) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (doc_id, author, creator, producer, software_fingerprint, time_bucket)
+        )
+        self.conn.commit()
+
+    def load_metadata_fingerprints(self) -> Dict[str, Dict[str, str]]:
+        """加载所有文档的元数据指纹
+
+        Returns:
+            {doc_id: {author, creator, producer, software_fingerprint, time_bucket}}
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT doc_id, author, creator, producer, "
+            "software_fingerprint, time_bucket FROM metadata_fingerprints"
+        )
+        result = {}
+        for row in cursor.fetchall():
+            result[row[0]] = {
+                'author': row[1] or '',
+                'creator': row[2] or '',
+                'producer': row[3] or '',
+                'software_fingerprint': row[4] or '',
+                'time_bucket': row[5] or '',
+            }
+        return result
 
     # ================================================================
     # 候选对 CRUD

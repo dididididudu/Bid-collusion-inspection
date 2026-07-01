@@ -162,9 +162,18 @@ class ParagraphMatcher:
                 # === Stage 2b: SBERT semantic verification ===
                 sbert_results = []
                 if semantic_candidates:
-                    sbert_results = self.semantic_matcher.score_pairs(
-                        semantic_candidates, para_texts_a, para_texts_b
-                    )
+                    # 检查是否有预计算嵌入缓存（Phase 1.5 已运行）
+                    if (self.config.ENABLE_EMBEDDING_CACHE
+                            and hasattr(self.semantic_matcher, 'score_pairs_from_cache')):
+                        sbert_results = self.semantic_matcher.score_pairs_from_cache(
+                            semantic_candidates, para_texts_a, para_texts_b, cache,
+                            doc_a_id=doc_a.doc_id, doc_b_id=doc_b.doc_id,
+                        )
+                    else:
+                        # 回退：实时 SBERT 编码
+                        sbert_results = self.semantic_matcher.score_pairs(
+                            semantic_candidates, para_texts_a, para_texts_b
+                        )
 
                 # Merge results: exact matches first
                 stage2_results = exact_matches + sbert_results

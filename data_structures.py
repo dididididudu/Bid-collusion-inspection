@@ -122,7 +122,7 @@ class CheckpointState:
     start_time: str = ""  # 管道启动时间
     config_hash: str = ""  # 配置哈希（检测配置漂移）
     input_hash: str = ""  # 输入文件夹内容哈希（检测文件变化）
-    version: int = 3  # 检查点格式版本
+    version: int = 4  # 检查点格式版本（v4: 新增 Phase 1.5）
 
 
 # ============================================================

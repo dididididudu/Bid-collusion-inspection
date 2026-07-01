@@ -80,6 +80,21 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         logger.info(f"配置加载完成: MAX_WORKERS={config.MAX_WORKERS}, CHECKPOINT_INTERVAL={config.CHECKPOINT_INTERVAL}")
 
+        # 自动清除旧缓存文件（每次启动干净运行）
+        if config.DISABLE_CACHE:
+            import glob as _glob
+            for _f in _glob.glob(os.path.join(config.CACHE_DIR, "features.db*")):
+                try:
+                    os.remove(_f)
+                except OSError:
+                    pass
+            for _f in _glob.glob(os.path.join(config.CHECKPOINT_DIR, "*")):
+                try:
+                    os.remove(_f)
+                except OSError:
+                    pass
+            logger.info("旧缓存文件已清除")
+
         service = BidDetectionOrchestrator(config)
 
         process_start = datetime.now()

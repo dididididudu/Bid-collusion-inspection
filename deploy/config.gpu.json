@@ -1,0 +1,28 @@
+{
+    "_comment": "GPU 服务器优化配置 — 使用: python main.py --config deploy/config.gpu.json -i <输入> -o <输出>",
+
+    "USE_GPU": true,
+    "SBERT_DEVICE": "auto",
+    "SBERT_BATCH_SIZE": 256,
+
+    "MAX_WORKERS": 4,
+    "MAX_MEMORY_MB": 8192,
+    "CHUNK_PAGE_SIZE": 100,
+
+    "MINHASH_NUM_HASHES": 128,
+    "MINHASH_NUM_HASHES_PARAGRAPH": 32,
+    "MINHASH_LSH_THRESHOLD": 0.3,
+    "PARAGRAPH_MIN_JACCARD": 0.05,
+
+    "PARAGRAPH_MATCH_STAGE1_TOP_K": 5000,
+    "PARAGRAPH_MATCH_STAGE2_TOP_K": 10000,
+
+    "ENABLE_EMBEDDING_CACHE": true,
+    "DOC_VECTOR_FILTER_ENABLED": true,
+    "DOC_VECTOR_THRESHOLD": 0.3,
+    "METADATA_FILTER_ENABLED": true,
+
+    "CHECKPOINT_INTERVAL": 100,
+    "ENABLE_CHECKPOINT": true,
+    "DISABLE_CACHE": true
+}
