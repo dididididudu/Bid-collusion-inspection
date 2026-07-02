@@ -76,25 +76,13 @@ class ReportGenerator:
             return "基本不相似"
 
     def _generate_html_report(self, report: GlobalReport, output_dir: str) -> None:
-        """生成HTML可视化报告（新增）
-
-        特点：
-        - 彩色高亮显示相似文本
-        - 可折叠的详细信息
-        - 更好的可读性
-        """
+        """生成HTML可视化报告 — 展示所有匹配证据，无过滤"""
         html_path = os.path.join(output_dir, "detection_report.html")
 
         all_results = report.pairwise_results
         all_results.sort(key=lambda x: x.risk_score, reverse=True)
 
-        # 过滤有实质内容的结果
-        filtered_results = [
-            r for r in all_results
-            if r.similarity_scores.get('text_local', 0) >= 0.3
-        ]
-
-        html = self._build_html_content(report, filtered_results)
+        html = self._build_html_content(report, all_results)
 
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(html)
@@ -280,20 +268,26 @@ summary:hover {{ background: #bbdefb; }}
 
     @staticmethod
     def _append_image_evidence_html(parts: list, image_ev) -> None:
-        """追加图片雷同证据到 HTML 片段列表"""
-        if not (getattr(image_ev, 'exact_image_count', 0) > 0
-                or getattr(image_ev, 'near_identical_count', 0) > 0
-                or getattr(image_ev, 'similar_image_count', 0) > 0
-                or getattr(image_ev, 'ps_suspicious', False)
-                or getattr(image_ev, 'shared_typo_count', 0) > 0
-                or getattr(image_ev, 'text_identical_count', 0) > 0
-                or getattr(image_ev, 'text_similar_count', 0) > 0):
+        """追加图片雷同证据到 HTML 片段列表（含逐对详情）"""
+        ie = image_ev
+
+        has_any = (getattr(ie, 'exact_image_count', 0) > 0
+                   or getattr(ie, 'near_identical_count', 0) > 0
+                   or getattr(ie, 'similar_image_count', 0) > 0
+                   or getattr(ie, 'ps_suspicious', False)
+                   or getattr(ie, 'shared_typo_count', 0) > 0
+                   or getattr(ie, 'text_identical_count', 0) > 0
+                   or getattr(ie, 'text_similar_count', 0) > 0
+                   or getattr(ie, 'matched_image_pairs', None)
+                   or getattr(ie, 'matched_text_pairs', None)
+                   or getattr(ie, 'ps_detail_list', None))
+        if not has_any:
             return
 
-        ie = image_ev
         parts.append("<div class='section-title'>📷 图片雷同证据</div>")
         parts.append("<div style='margin:10px 0;'>")
 
+        # === 汇总 ===
         if getattr(ie, 'exact_image_count', 0) > 0:
             parts.append(f"<p><strong>完全相同图片:</strong> {ie.exact_image_count} 对</p>")
         if getattr(ie, 'near_identical_count', 0) > 0:
@@ -301,7 +295,7 @@ summary:hover {{ background: #bbdefb; }}
         if getattr(ie, 'similar_image_count', 0) > 0:
             parts.append(f"<p><strong>相似图片:</strong> {ie.similar_image_count} 对</p>")
         if getattr(ie, 'ps_suspicious', False):
-            parts.append(f"<p><strong>⚠ PS嫌疑:</strong> {ie.ps_suspicious_count} 对图片文字相同但图片特征不同</p>")
+            parts.append(f"<p><strong>⚠ PS嫌疑:</strong> {ie.ps_suspicious_count} 对</p>")
         if getattr(ie, 'shared_typo_count', 0) > 0:
             typos_str = ', '.join(getattr(ie, 'shared_typos', [])[:5])
             parts.append(f"<p><strong>相同错别字:</strong> {ie.shared_typo_count} 个 "
@@ -310,10 +304,80 @@ summary:hover {{ background: #bbdefb; }}
             parts.append(f"<p><strong>图片文字完全相同:</strong> {ie.text_identical_count} 对</p>")
         if getattr(ie, 'text_similar_count', 0) > 0:
             parts.append(f"<p><strong>图片文字高度相似:</strong> {ie.text_similar_count} 对</p>")
-
         parts.append(f"<p><strong>图片风险分:</strong> {getattr(ie, 'image_risk_score', 0)}/30</p>")
 
-        # === 嵌入匹配的原图 ===
+        # === 逐对图片匹配详情 ===
+        image_pairs = getattr(ie, 'matched_image_pairs', None) or []
+        if image_pairs:
+            parts.append("<details open><summary style='margin-top:15px;'>🖼 逐对图片匹配详情（全部展示）</summary>")
+            for idx, pair in enumerate(image_pairs):
+                thumb_a = pair.get('thumbnail_base64_a', '')
+                thumb_b = pair.get('thumbnail_base64_b', '')
+                conf = pair.get('confidence', 0)
+                orb = pair.get('orb_match_ratio', 0)
+                hist = pair.get('histogram_correlation', 0)
+
+                parts.append(f"""
+<div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin:10px 0;background:#fafafa;'>
+  <div style='font-size:13px;color:#2c3e50;margin-bottom:8px;'>
+    <strong>#{idx+1}</strong> — 置信度: {conf:.3f}
+    <span style='color:#7f8c8d;font-size:12px;margin-left:10px;'>{' | '.join(pair.get('reasons', []))}</span>
+  </div>
+  <div style='display:flex;gap:15px;flex-wrap:wrap;'>
+    <div style='text-align:center;flex:1;min-width:120px;'>
+      <div style='font-size:11px;color:#7f8c8d;margin-bottom:4px;'>文档A — {pair.get('source_a','')}</div>
+      {'<img src="'+thumb_a+'" style="max-width:200px;max-height:150px;border:1px solid #ddd;border-radius:4px;" />' if thumb_a else '<div style="width:120px;height:80px;background:#eee;display:inline-flex;align-items:center;justify-content:center;font-size:11px;color:#999;">无缩略图</div>'}
+    </div>
+    <div style='text-align:center;flex:1;min-width:120px;'>
+      <div style='font-size:11px;color:#7f8c8d;margin-bottom:4px;'>文档B — {pair.get('source_b','')}</div>
+      {'<img src="'+thumb_b+'" style="max-width:200px;max-height:150px;border:1px solid #ddd;border-radius:4px;" />' if thumb_b else '<div style="width:120px;height:80px;background:#eee;display:inline-flex;align-items:center;justify-content:center;font-size:11px;color:#999;">无缩略图</div>'}
+    </div>
+  </div>
+  <div style='font-size:12px;color:#555;margin-top:6px;display:flex;gap:15px;flex-wrap:wrap;'>
+    <span>pHashes距离: {pair.get('phash_dist','-')} / dHash距离: {pair.get('dhash_dist','-')}</span>
+    <span>ORB匹配率: {orb:.2f}</span>
+    <span>直方图相关性: {hist:.3f}</span>
+  </div>
+</div>""")
+            parts.append("</details>")
+
+        # === 逐对文字匹配详情 ===
+        text_pairs = getattr(ie, 'matched_text_pairs', None) or []
+        if text_pairs:
+            parts.append("<details><summary style='margin-top:15px;'>📝 逐对图片文字匹配详情（全部展示）</summary>")
+            for idx, t in enumerate(text_pairs):
+                parts.append(f"""
+<div style='border:1px solid #ddd;border-radius:6px;padding:10px;margin:8px 0;background:#fafafa;'>
+  <div style='font-size:12px;color:#555;margin-bottom:6px;'>
+    <strong>#{idx+1}</strong> SBERT相似度: {t.get('similarity',0):.4f} | 方法: {t.get('method','?')}
+  </div>
+  <div class='text-compare'>
+    <div class='text-col'><h4>文档A</h4>{ReportGenerator._escape_html(t.get('text_a',''))}</div>
+    <div class='text-col'><h4>文档B</h4>{ReportGenerator._escape_html(t.get('text_b',''))}</div>
+  </div>
+</div>""")
+            parts.append("</details>")
+
+        # === PS 嫌疑详情 ===
+        ps_list = getattr(ie, 'ps_detail_list', None) or []
+        if ps_list:
+            parts.append("<details><summary style='margin-top:15px;'>⚠ PS 嫌疑详情（全部展示）</summary>")
+            for idx, p in enumerate(ps_list):
+                parts.append(f"""
+<div style='border:1px solid #ffc107;border-radius:6px;padding:10px;margin:8px 0;background:#fffde7;'>
+  <div style='font-size:12px;color:#555;margin-bottom:6px;'>
+    <strong>#{idx+1}</strong> 文字相似度: {p.get('text_sim',0):.3f} |
+    non_text距离: {p.get('non_text_dist','?')} |
+    证据数: {p.get('evidence_count',1)}
+  </div>
+  <div class='text-compare'>
+    <div class='text-col'><h4>文档A</h4>{ReportGenerator._escape_html(p.get('text_a',''))}</div>
+    <div class='text-col'><h4>文档B</h4>{ReportGenerator._escape_html(p.get('text_b',''))}</div>
+  </div>
+</div>""")
+            parts.append("</details>")
+
+        # === 嵌入匹配的原图（旧版路径，保留兼容） ===
         matched_paths = getattr(ie, 'matched_image_paths', {}) or {}
         if matched_paths:
             paths_a = matched_paths.get('doc_a', {})
@@ -321,9 +385,9 @@ summary:hover {{ background: #bbdefb; }}
             common_hashes = set(paths_a.keys()) & set(paths_b.keys())
             if common_hashes:
                 parts.append("<div style='margin-top:15px;'>")
-                parts.append("<p><strong>🖼 匹配图片对比:</strong></p>")
+                parts.append("<p><strong>🖼 匹配图片对比（PDF源图）:</strong></p>")
                 from image_analysis.image_exporter import image_to_base64
-                for h in sorted(common_hashes)[:20]:  # 最多20对
+                for h in sorted(common_hashes):
                     b64_a = image_to_base64(paths_a[h])
                     b64_b = image_to_base64(paths_b[h])
                     if b64_a and b64_b:

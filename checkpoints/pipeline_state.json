@@ -3,15 +3,15 @@
   "completed_pairs": 1,
   "total_pairs": 1,
   "processed_files": [
-    "./input\\测试6.pdf",
-    "./input\\测试7.pdf"
+    "input\\测试66.pdf",
+    "input\\测试6.pdf"
   ],
   "completed_pair_ids": [
-    "697b16a04330ed19::c9e5b739ca870301"
+    "96aa619a418b3485::c8a36cb8dc7b7b47"
   ],
-  "start_time": "2026-07-02T16:37:37.152456",
+  "start_time": "2026-07-02T23:49:20.836461",
   "config_hash": "21cde3b57080",
-  "input_hash": "131f14776f5b7c64a08591bce5792ff5",
+  "input_hash": "e204bfba60fede83f7c8b87b83ea8826",
   "version": 2,
-  "updated_at": "2026-07-02T16:38:54.324246"
+  "updated_at": "2026-07-02T23:51:03.940820"
 }

@@ -30,7 +30,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 3  # v3: 新增 image_ocr_results 表
+    SCHEMA_VERSION = 6  # v6: image_ocr_results 新增 thumbnail 列
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -108,6 +108,15 @@ class DocumentCache:
             # v3 迁移：新增图片 OCR 结果表
             if current_version < 3:
                 self._migrate_v3(cursor)
+            # v4 迁移：image_ocr_results 新增 non_text_hash 列
+            if current_version < 4:
+                self._migrate_v4(cursor)
+            # v5 迁移：image_ocr_results 新增 image_width/image_height 列
+            if current_version < 5:
+                self._migrate_v5(cursor)
+            # v6 迁移：image_ocr_results 新增 thumbnail 列
+            if current_version < 6:
+                self._migrate_v6(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -172,6 +181,41 @@ class DocumentCache:
             "ON image_ocr_results(doc_id)"
         )
         logger.info("v3 模式迁移完成：图片 OCR 结果表")
+
+    def _migrate_v4(self, cursor):
+        """v4 迁移：image_ocr_results 新增 non_text_hash 列"""
+        try:
+            cursor.execute(
+                "ALTER TABLE image_ocr_results "
+                "ADD COLUMN non_text_hash TEXT DEFAULT ''"
+            )
+            logger.info("v4 模式迁移完成：新增 non_text_hash 列")
+        except Exception:
+            # 列可能已存在
+            pass
+
+    def _migrate_v5(self, cursor):
+        """v5 迁移：image_ocr_results 新增 image_width/image_height 列"""
+        for col in ['image_width', 'image_height']:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE image_ocr_results "
+                    f"ADD COLUMN {col} INTEGER DEFAULT 0"
+                )
+                logger.info(f"v5 迁移完成：新增 {col} 列")
+            except Exception:
+                pass
+
+    def _migrate_v6(self, cursor):
+        """v6 迁移：image_ocr_results 新增 thumbnail 列"""
+        try:
+            cursor.execute(
+                "ALTER TABLE image_ocr_results "
+                "ADD COLUMN thumbnail BLOB DEFAULT NULL"
+            )
+            logger.info("v6 迁移完成：新增 thumbnail 列")
+        except Exception:
+            pass
 
     def _create_tables(self, cursor):
         """创建所有表"""
@@ -760,18 +804,26 @@ class DocumentCache:
         self, doc_id: str, page_num: int, image_hash: str,
         ocr_text: str = '', ocr_words: List[str] = None,
         bboxes: List[Dict] = None, confidence: float = 0.0,
+        non_text_hash: str = '',
+        image_width: int = 0, image_height: int = 0,
+        thumbnail: bytes = b'',
     ) -> None:
         """存储单张图片的 OCR 结果"""
         import json as _json
         self.conn.execute(
             "INSERT OR REPLACE INTO image_ocr_results "
             "(doc_id, page_num, image_hash, ocr_text, ocr_words_json, "
-            "text_bboxes_json, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "text_bboxes_json, confidence, non_text_hash, "
+            "image_width, image_height, thumbnail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 doc_id, page_num, image_hash, ocr_text,
                 _json.dumps(ocr_words or [], ensure_ascii=False),
                 _json.dumps(bboxes or [], ensure_ascii=False),
                 confidence,
+                non_text_hash,
+                image_width, image_height,
+                thumbnail if thumbnail else None,
             )
         )
         self.conn.commit()
@@ -782,22 +834,71 @@ class DocumentCache:
         """加载文档的所有图片 OCR 结果"""
         import json as _json
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
-            "text_bboxes_json, confidence FROM image_ocr_results "
-            "WHERE doc_id = ? ORDER BY page_num",
-            (doc_id,)
-        )
+
+        # 探测列数（兼容 v3/v4/v5）
+        col_count = 0
+        try:
+            cursor.execute("PRAGMA table_info(image_ocr_results)")
+            col_count = len(cursor.fetchall())
+        except Exception:
+            pass
+
+        if col_count >= 10:
+            # v6+: 含 non_text_hash + image_width + image_height + thumbnail
+            cursor.execute(
+                "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
+                "text_bboxes_json, confidence, non_text_hash, "
+                "image_width, image_height, thumbnail "
+                "FROM image_ocr_results "
+                "WHERE doc_id = ? ORDER BY page_num",
+                (doc_id,)
+            )
+        elif col_count >= 9:
+            # v5: 含 non_text_hash + image_width + image_height
+            cursor.execute(
+                "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
+                "text_bboxes_json, confidence, non_text_hash, "
+                "image_width, image_height "
+                "FROM image_ocr_results "
+                "WHERE doc_id = ? ORDER BY page_num",
+                (doc_id,)
+            )
+        elif col_count >= 7:
+            # v4: 含 non_text_hash
+            cursor.execute(
+                "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
+                "text_bboxes_json, confidence, non_text_hash "
+                "FROM image_ocr_results "
+                "WHERE doc_id = ? ORDER BY page_num",
+                (doc_id,)
+            )
+        else:
+            # v3: 无 non_text_hash
+            cursor.execute(
+                "SELECT page_num, image_hash, ocr_text, ocr_words_json, "
+                "text_bboxes_json, confidence FROM image_ocr_results "
+                "WHERE doc_id = ? ORDER BY page_num",
+                (doc_id,)
+            )
+
         results = []
         for row in cursor.fetchall():
-            results.append({
+            entry = {
                 'page_num': row[0],
                 'image_hash': row[1],
                 'ocr_text': row[2] or '',
                 'ocr_words': _json.loads(row[3] or '[]'),
                 'bboxes': _json.loads(row[4] or '[]'),
                 'confidence': row[5] or 0.0,
-            })
+            }
+            if col_count >= 7:
+                entry['non_text_hash'] = row[6] or ''
+            if col_count >= 9:
+                entry['image_width'] = row[7] or 0
+                entry['image_height'] = row[8] or 0
+            if col_count >= 10:
+                entry['thumbnail'] = row[9] if row[9] else b''
+            results.append(entry)
         return results
 
     # ================================================================
@@ -860,11 +961,25 @@ class DocumentCache:
         evidence = result.evidence
         text_ev = evidence.text_evidence
 
+        ie = evidence.image_evidence
         evidence_json = json.dumps({
             'metadata_matched_fields': evidence.metadata_evidence.matched_fields,
             'metadata_matched_values': evidence.metadata_evidence.matched_values,
             'same_time_bucket': evidence.metadata_evidence.same_time_bucket,
-            'image_common_hashes': evidence.image_evidence.common_image_hashes,
+            # 图片证据完整字段
+            'image_common_hashes': ie.common_image_hashes,
+            'image_exact_count': ie.exact_image_count,
+            'image_near_identical_count': ie.near_identical_count,
+            'image_similar_count': ie.similar_image_count,
+            'image_risk_score': ie.image_risk_score,
+            'image_risk_factors': ie.image_risk_factors,
+            'ps_suspicious': ie.ps_suspicious,
+            'ps_suspicious_count': ie.ps_suspicious_count,
+            'shared_typos': ie.shared_typos,
+            'shared_typo_count': ie.shared_typo_count,
+            'text_identical_count': ie.text_identical_count,
+            'text_similar_count': ie.text_similar_count,
+            # 段落证据
             'detection_summary': text_ev.detection_summary,
             'common_paragraphs': text_ev.common_paragraphs[:10],
             'continuous_clone_blocks': text_ev.continuous_clone_blocks,
@@ -985,6 +1100,17 @@ class DocumentCache:
             image_evidence = ImageEvidence(
                 common_image_count=data['image_match_count'] or 0,
                 common_image_hashes=evidence_raw.get('image_common_hashes', []),
+                exact_image_count=evidence_raw.get('image_exact_count', 0),
+                near_identical_count=evidence_raw.get('image_near_identical_count', 0),
+                similar_image_count=evidence_raw.get('image_similar_count', 0),
+                image_risk_score=evidence_raw.get('image_risk_score', 0),
+                image_risk_factors=evidence_raw.get('image_risk_factors', []),
+                ps_suspicious=evidence_raw.get('ps_suspicious', False),
+                ps_suspicious_count=evidence_raw.get('ps_suspicious_count', 0),
+                shared_typos=evidence_raw.get('shared_typos', []),
+                shared_typo_count=evidence_raw.get('shared_typo_count', 0),
+                text_identical_count=evidence_raw.get('text_identical_count', 0),
+                text_similar_count=evidence_raw.get('text_similar_count', 0),
             )
 
             results.append(PairwiseResult(

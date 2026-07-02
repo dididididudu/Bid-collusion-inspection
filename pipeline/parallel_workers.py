@@ -76,6 +76,10 @@ def _build_image_evidence(
             bboxes=r['bboxes'],
             confidence=r['confidence'],
             image_hash=r.get('image_hash', ''),
+            non_text_hash=r.get('non_text_hash', ''),
+            image_width=r.get('image_width', 0),
+            image_height=r.get('image_height', 0),
+            thumbnail=r.get('thumbnail', b''),
         ) for r in ocr_a
     ]
     ocr_objects_b = [
@@ -85,6 +89,10 @@ def _build_image_evidence(
             bboxes=r['bboxes'],
             confidence=r['confidence'],
             image_hash=r.get('image_hash', ''),
+            non_text_hash=r.get('non_text_hash', ''),
+            image_width=r.get('image_width', 0),
+            image_height=r.get('image_height', 0),
+            thumbnail=r.get('thumbnail', b''),
         ) for r in ocr_b
     ]
 

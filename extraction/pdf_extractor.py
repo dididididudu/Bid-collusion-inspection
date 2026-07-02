@@ -313,7 +313,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                             img = img.convert('RGB')
 
                         phash = imagehash.phash(img)
-                        hashes.append(str(phash))
+                        hashes.append(f"p{phash}")
 
                     except Exception as e:
                         logger.debug(
@@ -480,6 +480,24 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
         if not final_sentences and len(text.strip()) > 15:
             final_sentences = [text.strip()]
+
+        # 第5步：合并连续短段（解决 Word→PDF 换行切碎问题）
+        # 连续长度 < 50 字符的段落合并为一段，避免因换行位置不同导致匹配失败
+        MERGE_THRESHOLD = 50
+        merged = []
+        buffer = ""
+        for p in final_sentences:
+            if len(p) < MERGE_THRESHOLD:
+                buffer += p
+            else:
+                if buffer:
+                    merged.append(buffer)
+                    buffer = ""
+                merged.append(p)
+        if buffer:
+            merged.append(buffer)
+        # 确保合并后的段落至少15字符
+        final_sentences = [p for p in merged if len(p) >= 15]
 
         return final_sentences
 
