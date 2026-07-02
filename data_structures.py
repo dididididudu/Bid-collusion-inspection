@@ -51,6 +51,7 @@ class BidFeature:
     doc_id: str
     filename: str
     file_size: int
+    file_path: str = ""  # 原始 PDF 路径（供图片导出）
 
     # === 文本内容 (旧版：内存存储；流式：为空，从 SQLite 惰性加载) ===
     text_content: str = ""
@@ -183,6 +184,9 @@ class ImageEvidence:
     # OCR 原始结果
     ocr_results_a: List[Dict] = field(default_factory=list)
     ocr_results_b: List[Dict] = field(default_factory=list)
+
+    # 匹配图片路径（供 HTML 报告嵌入展示，JSON 中仅存储路径）
+    matched_image_paths: Dict = field(default_factory=dict)
 
     # 综合
     image_risk_score: int = 0            # 图片维度风险分 (0-30)

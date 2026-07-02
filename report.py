@@ -312,6 +312,36 @@ summary:hover {{ background: #bbdefb; }}
             parts.append(f"<p><strong>图片文字高度相似:</strong> {ie.text_similar_count} 对</p>")
 
         parts.append(f"<p><strong>图片风险分:</strong> {getattr(ie, 'image_risk_score', 0)}/30</p>")
+
+        # === 嵌入匹配的原图 ===
+        matched_paths = getattr(ie, 'matched_image_paths', {}) or {}
+        if matched_paths:
+            paths_a = matched_paths.get('doc_a', {})
+            paths_b = matched_paths.get('doc_b', {})
+            common_hashes = set(paths_a.keys()) & set(paths_b.keys())
+            if common_hashes:
+                parts.append("<div style='margin-top:15px;'>")
+                parts.append("<p><strong>🖼 匹配图片对比:</strong></p>")
+                from image_analysis.image_exporter import image_to_base64
+                for h in sorted(common_hashes)[:20]:  # 最多20对
+                    b64_a = image_to_base64(paths_a[h])
+                    b64_b = image_to_base64(paths_b[h])
+                    if b64_a and b64_b:
+                        parts.append(f"""
+<div style='display:inline-block;margin:10px;border:2px solid #e74c3c;border-radius:8px;padding:10px;background:#fff;'>
+  <div style='display:flex;gap:10px;align-items:flex-start;'>
+    <div style='text-align:center;'>
+      <div style='font-size:11px;color:#7f8c8d;margin-bottom:4px;'>文档A</div>
+      <img src='{b64_a}' style='max-width:300px;max-height:200px;border:1px solid #ddd;' />
+    </div>
+    <div style='text-align:center;'>
+      <div style='font-size:11px;color:#7f8c8d;margin-bottom:4px;'>文档B</div>
+      <img src='{b64_b}' style='max-width:300px;max-height:200px;border:1px solid #ddd;' />
+    </div>
+  </div>
+  <div style='font-size:10px;color:#95a5a6;margin-top:4px;text-align:center;'>hash: {h[:16]}...</div>
+</div>""")
+                parts.append("</div>")
         parts.append("</div>")
 
     def _build_match_html(self, match: dict, filename_a: str, filename_b: str,

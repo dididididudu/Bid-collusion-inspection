@@ -48,8 +48,15 @@ def build_image_evidence(
     doc_b: BidFeature,
     cache,
     image_matcher: ImageMatcher = None,
+    file_path_a: str = None,
+    file_path_b: str = None,
+    output_dir: str = None,
 ) -> ImageEvidence:
-    """构建增强图片证据 — 四层检测（哈希 + OCR + 错字 + 文字相同）"""
+    """构建增强图片证据 — 四层检测（哈希 + OCR + 错字 + 文字相同）
+
+    如果提供 file_path 和 output_dir，会将匹配的图片保存到磁盘，
+    供 HTML 报告嵌入展示。图片数据不写入 JSON 报告。
+    """
     evidence = ImageEvidence()
 
     if image_matcher is None:
@@ -61,6 +68,22 @@ def build_image_evidence(
     common_exact = list(set(hashes_a) & set(hashes_b))
     evidence.common_image_count = len(common_exact)
     evidence.common_image_hashes = common_exact
+
+    # 如果提供了输出目录，保存匹配的图片
+    matched_images = {}
+    if output_dir and common_exact and (file_path_a or file_path_b):
+        from image_analysis.image_exporter import find_matching_images_from_pdf
+        if file_path_a and os.path.exists(file_path_a):
+            imgs_a = find_matching_images_from_pdf(
+                file_path_a, doc_a.doc_id, common_exact, output_dir,
+            )
+            matched_images['doc_a'] = imgs_a
+        if file_path_b and os.path.exists(file_path_b):
+            imgs_b = find_matching_images_from_pdf(
+                file_path_b, doc_b.doc_id, common_exact, output_dir,
+            )
+            matched_images['doc_b'] = imgs_b
+    evidence.matched_image_paths = matched_images
 
     # 加载 OCR 结果
     ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
