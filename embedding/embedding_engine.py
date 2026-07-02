@@ -7,7 +7,7 @@
 
 import os
 import logging
-from typing import List, Dict, Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -156,16 +156,3 @@ class EmbeddingEngine:
             f"文档向量维度={doc_embedding.shape[0]}"
         )
         return len(paragraphs)
-
-    def compute_doc_embedding_from_cache(
-        self, doc_id: str, cache
-    ) -> Optional[np.ndarray]:
-        """从缓存的段落嵌入计算文档级嵌入（均值池化）
-
-        用于从已缓存的段落嵌入重新计算文档向量。
-        """
-        para_embs = cache.load_all_paragraph_embeddings(doc_id)
-        if not para_embs:
-            return None
-        all_embs = np.stack(list(para_embs.values()))
-        return np.mean(all_embs, axis=0).astype(np.float32)

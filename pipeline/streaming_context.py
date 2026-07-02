@@ -10,7 +10,7 @@ LRU 流式上下文管理器
 
 import logging
 from collections import OrderedDict
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 from extraction.feature_cache import DocumentCache
 from data_structures import ChunkMetadata

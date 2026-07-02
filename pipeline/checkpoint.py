@@ -18,7 +18,7 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from typing import Optional, Set
+from typing import Set
 
 from data_structures import CheckpointState
 from config import DetectionConfig

@@ -8,7 +8,7 @@ L4: 图片文字完全相同（不同图片中 OCR 文字高度一致）
 """
 
 import logging
-from typing import List, Dict, Tuple, Set, Optional
+from typing import List
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -192,10 +192,13 @@ class ImageMatcher:
         ocr_b: List[OCRResult],
         result: ImageMatchResult,
     ):
-        """L2: PS 嫌疑检测
+        """L2: PS 嫌疑检测（改进版：真实图片哈希对比）
 
-        逻辑：OCR 文字高度相似，但图片哈希不同 → PS 嫌疑。
+        逻辑：OCR 文字高度相似，但图片哈希差异大 → PS 嫌疑。
         即：文字内容没变，但图片被修改过（如改背景、换logo）。
+
+        优先使用图片哈希汉明距离判定；无 image_hash 时
+        回退到 OCR 置信度差异作为辅助信号。
         """
         for ra in ocr_a:
             if len(ra.text) < self.TEXT_MIN_LENGTH:
@@ -208,11 +211,19 @@ class ImageMatcher:
                 if ocr_sim < self.OCR_SIMILARITY_THRESHOLD:
                     continue
 
-                # OCR 文字高度相似 → 检查是否有哈希差异
-                # （此处用 OCR 置信度差异作为 PS 的辅助信号）
-                conf_diff = abs(ra.confidence - rb.confidence)
-                if conf_diff > 0.15:  # 置信度差异大 → 图片质量不同
-                    result.ps_suspicious_count += 1
+                # OCR 文字高度相似 → 检查图片哈希差异
+                if ra.image_hash and rb.image_hash:
+                    # 主路径：真实图片哈希比对
+                    hash_dist = ImageHasher.hamming_distance(
+                        ra.image_hash, rb.image_hash
+                    )
+                    if hash_dist >= self.HASH_DISSIMILARITY_THRESHOLD:
+                        result.ps_suspicious_count += 1
+                else:
+                    # 回退路径：置信度差异（弱信号）
+                    conf_diff = abs(ra.confidence - rb.confidence)
+                    if conf_diff > 0.15:
+                        result.ps_suspicious_count += 1
 
         if result.ps_suspicious_count > 0:
             result.ps_suspicious = True

@@ -2,7 +2,7 @@
 核心数据结构定义
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set
 from datetime import datetime
 
 

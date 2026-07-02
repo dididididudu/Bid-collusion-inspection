@@ -1,0 +1,38 @@
+# ============================================================
+# 投标串标检测系统 — CPU 生产环境依赖
+# PaddleOCR 2.10 + PaddlePaddle 2.6 (支持 det=False 仅识别)
+# 安装: pip install -r deploy/requirements.production.txt
+# ============================================================
+
+# OCR 引擎 — PaddleOCR 2.10 支持 det=False
+# 注意: 必须是 PaddlePaddle 2.x 才能配合 PaddleOCR 2.x
+paddlepaddle==2.6.2
+paddleocr==2.10.0
+
+# PDF 解析
+PyMuPDF>=1.23.0
+
+# 中文分词
+jieba>=0.42.1
+
+# 语义匹配 (SBERT)
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.30.0
+
+# 图片哈希
+Pillow>=10.0.0
+imagehash>=4.3.1
+
+# 数据处理
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# LSH 索引
+datasketch>=1.6.0
+
+# 图聚类
+networkx>=3.1
+
+# 工具
+python-dateutil>=2.8.2

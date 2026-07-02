@@ -1,28 +1,42 @@
 {
-    "_comment": "GPU 服务器优化配置 — 使用: python main.py --config deploy/config.gpu.json -i <输入> -o <输出>",
+  "_comment": "GPU 生产配置 — CUDA 12.1 + PaddleOCR 3.x (PP-OCRv6) + GPU 加速",
 
-    "USE_GPU": true,
-    "SBERT_DEVICE": "auto",
-    "SBERT_BATCH_SIZE": 256,
+  "TEXT_GLOBAL_THRESHOLD": 0.80,
+  "TEXT_LOCAL_THRESHOLD": 0.85,
 
-    "MAX_WORKERS": 4,
-    "MAX_MEMORY_MB": 8192,
-    "CHUNK_PAGE_SIZE": 100,
+  "USE_GPU": true,
+  "SBERT_DEVICE": "cuda",
+  "SBERT_BATCH_SIZE": 256,
 
-    "MINHASH_NUM_HASHES": 128,
-    "MINHASH_NUM_HASHES_PARAGRAPH": 32,
-    "MINHASH_LSH_THRESHOLD": 0.3,
-    "PARAGRAPH_MIN_JACCARD": 0.05,
+  "MAX_WORKERS": 8,
+  "PHASE1_WORKERS": 4,
+  "PHASE3_WORKERS": 4,
+  "EMBED_WORKERS": 4,
+  "CHUNK_PAGE_SIZE": 50,
+  "MAX_MEMORY_MB": 8192,
+  "DB_BUSY_TIMEOUT": 60000,
 
-    "PARAGRAPH_MATCH_STAGE1_TOP_K": 5000,
-    "PARAGRAPH_MATCH_STAGE2_TOP_K": 10000,
+  "ENABLE_OCR": true,
+  "OCR_ENGINE": "paddleocr",
+  "OCR_LANGUAGES": ["ch_sim", "en"],
+  "OCR_MIN_CONFIDENCE": 0.3,
+  "OCR_MODEL_DIR": "./models/ocr",
+  "OCR_OFFLINE_MODE": true,
+  "PADDLEOCR_HOME": "./models/ocr",
+  "OCR_RETRY_COUNT": 3,
 
-    "ENABLE_EMBEDDING_CACHE": true,
-    "DOC_VECTOR_FILTER_ENABLED": true,
-    "DOC_VECTOR_THRESHOLD": 0.3,
-    "METADATA_FILTER_ENABLED": true,
+  "IMAGE_MIN_SIZE": 50,
+  "BID_BOILERPLATE_FILTER": true,
+  "BID_BOILERPLATE_WEIGHT": 0.3,
 
-    "CHECKPOINT_INTERVAL": 100,
-    "ENABLE_CHECKPOINT": true,
-    "DISABLE_CACHE": true
+  "MINHASH_BANDS": 8,
+  "MINHASH_ROWS": 4,
+  "MINHASH_NUM_HASHES_PARAGRAPH": 32,
+  "PARAGRAPH_MIN_JACCARD": 0.05,
+
+  "ENABLE_EMBEDDING_CACHE": true,
+  "DOC_VECTOR_FILTER_ENABLED": true,
+  "METADATA_FILTER_ENABLED": true,
+  "ENABLE_CHECKPOINT": true,
+  "DISABLE_CACHE": false
 }

@@ -5,7 +5,7 @@
 """
 
 import logging
-from typing import List, Tuple, Set, Dict
+from typing import List
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -96,48 +96,3 @@ class ImageHasher:
 
         results.sort(key=lambda x: x.hamming_dist)
         return results
-
-    def count_matches(
-        self,
-        hashes_a: List[str],
-        hashes_b: List[str],
-    ) -> Dict[str, int]:
-        """统计不同级别的匹配数量
-
-        Returns:
-            {
-                'exact': 完全相同数,
-                'near_identical': 几乎相同数 (0 < dist <= 5),
-                'similar': 相似数 (5 < dist <= 10),
-                'total': 总数,
-            }
-        """
-        matches = self.match_hashes(hashes_a, hashes_b)
-
-        exact = sum(1 for m in matches if m.is_exact)
-        near = sum(1 for m in matches if not m.is_exact and m.is_similar)
-        similar = sum(1 for m in matches if not m.is_similar)
-
-        return {
-            'exact': exact,
-            'near_identical': near,
-            'similar': similar,
-            'total': len(matches),
-        }
-
-    def find_common_hashes(
-        self,
-        hashes_a: List[str],
-        hashes_b: List[str],
-        max_distance: int = NEAR_IDENTICAL,
-    ) -> Set[Tuple[str, str]]:
-        """找两个文档间共用（相同或近似）的图片
-
-        返回 {(hash_a, hash_b), ...} 其中汉明距离 ≤ max_distance。
-        """
-        common = set()
-        for ha in hashes_a:
-            for hb in hashes_b:
-                if self.hamming_distance(ha, hb) <= max_distance:
-                    common.add((ha, hb))
-        return common

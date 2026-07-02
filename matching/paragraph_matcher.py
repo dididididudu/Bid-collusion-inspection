@@ -205,6 +205,29 @@ class ParagraphMatcher:
             if not result.get('paragraph_b'):
                 result['paragraph_b'] = cache.load_paragraph_text(doc_b.doc_id, j) or ''
 
+        # === 标书模板语过滤：降低招标文件原文/通用模板语的权重 ===
+        if getattr(self.config, 'BID_BOILERPLATE_FILTER', False):
+            boilerplate_count = 0
+            for result in stage2_results:
+                bp_ratio = _compute_boilerplate_ratio(
+                    result.get('paragraph_a', ''),
+                    result.get('paragraph_b', ''),
+                )
+                result['boilerplate_ratio'] = bp_ratio
+                # 模板语比例越高，相似度衰减越多
+                weight = getattr(self.config, 'BID_BOILERPLATE_WEIGHT', 0.3)
+                decay = 1.0 - bp_ratio * weight
+                original_sim = result['similarity']
+                result['similarity'] = round(original_sim * decay, 4)
+                result['original_similarity'] = original_sim  # 保留原始分数供参考
+                if bp_ratio > 0.5:
+                    boilerplate_count += 1
+            if boilerplate_count > 0:
+                logger.info(
+                    f"Boilerplate filter: {boilerplate_count}/{len(stage2_results)} "
+                    f"matches have high template language ratio"
+                )
+
         # Sort by similarity descending
         stage2_results.sort(key=lambda x: x['similarity'], reverse=True)
 
@@ -295,3 +318,58 @@ class ParagraphMatcher:
             return lsh.build_and_query(paras_a, paras_b)
         except ImportError:
             return []
+
+
+# ================================================================
+# 标书模板语检测 — 降低招标文件原文导致的误检
+# ================================================================
+
+# 中国标书中常见模板语/招标文件原文关键词
+_BID_BOILERPLATE_PATTERNS = [
+    # 测试验收类
+    '测试过程', '操作步骤', '期望结果', '评估准则', '测试结果与预期',
+    '验收标准', '验收条件', '测试方法', '测试用例', '检查测试结果',
+    # 服务承诺类
+    '投标人应具备', '投标人承诺', '服务承诺', '售后服务',
+    '项目合同期内', '验收后', '维护期内', '质量保证期',
+    '稳定性和安全性', '提供技术服务', '现场或远程', '技术支持服务',
+    'BUG', '修复', '运行异常处理', '响应',
+    # 招标响应类
+    '符合招标文件', '满足招标', '无偏离', '完全响应', '正偏离',
+    '招标文件要求', '技术规格', '商务条款',
+    # 格式模板类
+    '序号', '项目名称', '规格型号', '技术参数', '备注',
+    '投标人名称', '法定代表人', '授权代表',
+    # 通用管理类
+    '质量保证体系', '安全管理', '环境保护', '文明施工',
+    '项目管理', '进度计划', '资源配置', '人员配备',
+]
+
+
+def _compute_boilerplate_ratio(text_a: str, text_b: str) -> float:
+    """计算两个段落中模板语的占比（0.0=全部原创, 1.0=全是模板语）
+
+    模板语定义：在中国标书中反复出现的招标文件原文、通用格式语言。
+    这类内容来自招标文件而非投标人原创，不应作为串标证据。
+
+    算法：统计两个文本中模板语关键词的命中率。
+    """
+    if not text_a or not text_b:
+        return 0.0
+
+    a_hits = 0
+    b_hits = 0
+    a_len = max(len(text_a), 1)
+    b_len = max(len(text_b), 1)
+
+    for pattern in _BID_BOILERPLATE_PATTERNS:
+        if pattern in text_a:
+            a_hits += len(pattern)
+        if pattern in text_b:
+            b_hits += len(pattern)
+
+    ratio_a = min(1.0, a_hits / a_len)
+    ratio_b = min(1.0, b_hits / b_len)
+
+    # 取两段中模板语比例的最大值（只要有一段是模板语就降低权重）
+    return max(ratio_a, ratio_b)

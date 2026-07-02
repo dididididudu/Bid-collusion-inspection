@@ -9,8 +9,7 @@
 """
 
 import logging
-from typing import List, Dict
-from collections import Counter
+from typing import List
 
 import numpy as np
 

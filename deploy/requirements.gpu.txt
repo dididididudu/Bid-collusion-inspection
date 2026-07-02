@@ -1,0 +1,41 @@
+# ============================================================
+# 投标串标检测系统 — GPU 环境依赖 (CUDA 12.1)
+# PaddleOCR 3.x + PP-OCRv6 + GPU 加速
+#
+# 安装步骤:
+#   1. pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   2. pip install paddlepaddle-gpu -f https://www.paddlepaddle.org.cn/whl/linux/cuda12.1/stable.html
+#   3. pip install -r deploy/requirements.gpu.txt
+# ============================================================
+
+# OCR — PaddleOCR 3.x (PP-OCRv6)
+# paddlepaddle-gpu 需先单独安装 (见 setup_server_gpu.sh)
+paddleocr>=3.5.0
+
+# PDF 解析
+PyMuPDF>=1.23.0
+
+# 中文分词
+jieba>=0.42.1
+
+# 语义匹配 (SBERT + GPU)
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.30.0
+
+# 图片处理
+Pillow>=10.0.0
+imagehash>=4.3.1
+
+# 数据处理
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# LSH 索引
+datasketch>=1.6.0
+
+# 图聚类
+networkx>=3.1
+
+# 工具
+python-dateutil>=2.8.2

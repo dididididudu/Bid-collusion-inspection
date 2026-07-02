@@ -17,7 +17,10 @@ import os
 import glob
 import logging
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
+from concurrent.futures import (
+    ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+)
 
 from config import DetectionConfig
 from data_structures import (
@@ -32,16 +35,24 @@ from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.checkpoint import CheckpointManager
 from pipeline.streaming_context import StreamingContext
 from embedding.embedding_engine import EmbeddingEngine
-from image_analysis.image_ocr import ImageOCREngine, OCRResult
-from image_analysis.image_matcher import ImageMatcher, ImageMatchResult
+from image_analysis.image_ocr import ImageOCREngine
+from image_analysis.image_matcher import ImageMatcher
 from scoring import RiskScoringEngine
 from report import ReportGenerator
+from pipeline.evidence_builder import (
+    build_metadata_evidence, build_image_evidence, build_text_evidence,
+)
+from pipeline.ocr_helpers import ocr_pages, aggregate_ocr_paragraphs
+from utils.text_diff import compute_text_diff
 
 logger = logging.getLogger(__name__)
 
 
 class BidDetectionOrchestrator:
     """5 阶段流式管道编排器"""
+
+    # OCR 聚合段落的虚拟块索引（避免与正常文本块 0,1,2... 冲突）
+    OCR_CHUNK_INDEX: int = 1000000
 
     def __init__(self, config: DetectionConfig):
         self.config = config
@@ -62,6 +73,10 @@ class BidDetectionOrchestrator:
         # 图片分析引擎（OCR + 四层检测）
         self.ocr_engine = ImageOCREngine(
             use_gpu=config.USE_GPU,
+            engine=config.OCR_ENGINE,
+            model_dir=config.OCR_MODEL_DIR,
+            offline=config.OCR_OFFLINE_MODE,
+            retry_count=config.OCR_RETRY_COUNT,
         )
         self.image_matcher = ImageMatcher()
 
@@ -69,6 +84,13 @@ class BidDetectionOrchestrator:
         self._all_features_cache = None
 
         logger.info("流式管道编排器已初始化")
+
+    def _get_picklable_config(self) -> dict:
+        """生成可 pickle 序列化的配置字典（供 worker 进程传输）"""
+        return {
+            k: v for k, v in self.config.__dict__.items()
+            if not k.startswith('_')
+        }
 
     def detect(self, input_dir: str, output_dir: str) -> GlobalReport:
         """执行完整的 5 阶段检测流程
@@ -85,6 +107,14 @@ class BidDetectionOrchestrator:
         logger.info("=" * 60)
         logger.info("流式管道检测开始")
         logger.info("=" * 60)
+
+        # 启动时 OCR 引擎健康检查
+        if self.config.ENABLE_OCR:
+            ok, msg = self.ocr_engine.health_check()
+            if ok:
+                logger.info(f"OCR 引擎健康检查通过: {msg}")
+            else:
+                logger.warning(f"OCR 引擎健康检查未通过: {msg}")
 
         if self.config.DISABLE_CACHE:
             logger.info("缓存已禁用，清除旧缓存文件...")
@@ -147,34 +177,82 @@ class BidDetectionOrchestrator:
 
                 if not unprocessed:
                     logger.info("所有文件已处理，跳过 Phase 1")
+                else:
+                    extract_start = datetime.now()
+                    processed_count = 0
 
-                extract_start = datetime.now()
-                processed_count = 0
+                    num_workers = min(
+                        self.config.PHASE1_WORKERS,
+                        len(unprocessed),
+                        os.cpu_count() or 4,
+                    )
 
-                for file_path in unprocessed:
-                    try:
-                        self._phase1_extract_single(file_path)
-                        state.processed_files.add(file_path)
-                        processed_count += 1
+                    if num_workers <= 1:
+                        # === 串行路径 ===
+                        for file_path in unprocessed:
+                            try:
+                                self._phase1_extract_single(file_path)
+                                state.processed_files.add(file_path)
+                                processed_count += 1
 
-                        if processed_count % 10 == 0:
-                            logger.info(
-                                f"Phase 1 进度: {processed_count}/{len(unprocessed)}"
-                            )
-                            # 阶段性保存检查点
-                            self.checkpoint.save(state)
+                                if processed_count % 10 == 0:
+                                    logger.info(
+                                        f"Phase 1 进度: {processed_count}/{len(unprocessed)}"
+                                    )
+                                    self.checkpoint.save(state)
 
-                    except Exception as e:
-                        logger.error(f"提取失败 ({file_path}): {e}", exc_info=True)
-                        # 不中断，继续处理其他文件
-                        continue
+                            except Exception as e:
+                                logger.error(
+                                    f"提取失败 ({file_path}): {e}", exc_info=True
+                                )
+                                continue
+                    else:
+                        # === 并行路径 (ProcessPoolExecutor) ===
+                        logger.info(
+                            f"Phase 1 并行模式: {num_workers} workers, "
+                            f"{len(unprocessed)} 个文件"
+                        )
+                        from pipeline.parallel_workers import extract_single_worker
+
+                        config_dict = self._get_picklable_config()
+                        db_dir = self.config.CACHE_DIR
+
+                        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                            future_to_file = {
+                                executor.submit(
+                                    extract_single_worker,
+                                    (fp, config_dict, db_dir)
+                                ): fp
+                                for fp in unprocessed
+                            }
+
+                            for future in as_completed(future_to_file):
+                                file_path = future_to_file[future]
+                                try:
+                                    result = future.result()
+                                    if result['success']:
+                                        state.processed_files.add(file_path)
+                                        processed_count += 1
+                                    else:
+                                        logger.error(
+                                            f"提取失败 ({file_path}): "
+                                            f"{result.get('error', 'unknown')}"
+                                        )
+                                except Exception as e:
+                                    logger.error(
+                                        f"Worker 异常 ({file_path}): {e}",
+                                        exc_info=True,
+                                    )
+
+                                if processed_count % self.config.CHECKPOINT_INTERVAL == 0:
+                                    self.checkpoint.save(state)
 
                 state.phase = 2
                 self.checkpoint.save(state)
 
                 extract_time = (datetime.now() - extract_start).total_seconds()
                 logger.info(
-                    f"Phase 1 完成: {processed_count} 个文档, "
+                    f"Phase 1 完成: {processed_count}/{len(unprocessed)} 个文档, "
                     f"耗时 {extract_time:.2f}s"
                 )
 
@@ -226,37 +304,89 @@ class BidDetectionOrchestrator:
                     analyze_start = datetime.now()
                     total_pending = len(pending_pairs)
 
-                    for idx, (doc_a_id, doc_b_id) in enumerate(pending_pairs, 1):
-                        try:
-                            self._phase3_analyze_single(doc_a_id, doc_b_id)
+                    num_workers = min(
+                        self.config.PHASE3_WORKERS,
+                        total_pending,
+                        (os.cpu_count() or 4) * 2,  # 线程可超过 CPU 数
+                    )
 
-                            pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
-                            completed_ids.add(pair_id)
-                            state.completed_pairs = len(completed_ids)
+                    if num_workers <= 1:
+                        # === 串行路径 ===
+                        for idx, (doc_a_id, doc_b_id) in enumerate(pending_pairs, 1):
+                            try:
+                                self._phase3_analyze_single(doc_a_id, doc_b_id)
 
-                            # 进度日志
-                            if idx % 10 == 0 or idx == total_pending:
-                                logger.info(
-                                    f"Phase 3 进度: {idx}/{total_pending} "
-                                    f"({state.completed_pairs}/{state.total_pairs})"
+                                pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+                                completed_ids.add(pair_id)
+                                state.completed_pairs = len(completed_ids)
+
+                                if idx % 10 == 0 or idx == total_pending:
+                                    logger.info(
+                                        f"Phase 3 进度: {idx}/{total_pending} "
+                                        f"({state.completed_pairs}/{state.total_pairs})"
+                                    )
+
+                                if idx % self.config.CHECKPOINT_INTERVAL == 0:
+                                    self.checkpoint.save_phase3_progress(completed_ids)
+                                    self.checkpoint.save(state)
+                                    self.cache.conn.commit()
+
+                            except Exception as e:
+                                logger.error(
+                                    f"分析失败 ({doc_a_id} vs {doc_b_id}): {e}",
+                                    exc_info=True
                                 )
+                                self.cache.mark_pair_processed(doc_a_id, doc_b_id)
+                                continue
 
-                            # 增量检查点 + 批量提交 SQLite 写入
-                            if idx % self.config.CHECKPOINT_INTERVAL == 0:
-                                self.checkpoint.save_phase3_progress(completed_ids)
-                                self.checkpoint.save(state)
-                                self.cache.conn.commit()
+                        self.cache.conn.commit()
+                    else:
+                        # === 并行路径 (ThreadPoolExecutor) ===
+                        logger.info(
+                            f"Phase 3 并行模式: {num_workers} workers, "
+                            f"{total_pending} 对候选"
+                        )
+                        from pipeline.parallel_workers import analyze_pair_worker
 
-                        except Exception as e:
-                            logger.error(
-                                f"分析失败 ({doc_a_id} vs {doc_b_id}): {e}",
-                                exc_info=True
-                            )
-                            self.cache.mark_pair_processed(doc_a_id, doc_b_id)
-                            continue
+                        config_dict = self._get_picklable_config()
+                        db_dir = self.config.CACHE_DIR
 
-                    # 最终批量提交
-                    self.cache.conn.commit()
+                        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                            future_to_pair = {}
+                            for doc_a_id, doc_b_id in pending_pairs:
+                                future = executor.submit(
+                                    analyze_pair_worker,
+                                    (doc_a_id, doc_b_id, config_dict, db_dir)
+                                )
+                                future_to_pair[future] = (doc_a_id, doc_b_id)
+
+                            done_count = 0
+                            for future in as_completed(future_to_pair):
+                                doc_a_id, doc_b_id = future_to_pair[future]
+                                pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+                                done_count += 1
+
+                                try:
+                                    result = future.result()
+                                    if result.get('success', False):
+                                        completed_ids.add(pair_id)
+                                        state.completed_pairs = len(completed_ids)
+                                except Exception as e:
+                                    logger.error(
+                                        f"分析 worker 异常 "
+                                        f"({doc_a_id} vs {doc_b_id}): {e}",
+                                        exc_info=True,
+                                    )
+
+                                if done_count % 10 == 0 or done_count == total_pending:
+                                    logger.info(
+                                        f"Phase 3 进度: {done_count}/{total_pending} "
+                                        f"({len(completed_ids)}/{state.total_pairs})"
+                                    )
+
+                                if done_count % self.config.CHECKPOINT_INTERVAL == 0:
+                                    self.checkpoint.save_phase3_progress(completed_ids)
+                                    self.checkpoint.save(state)
 
                     analyze_time = (
                         datetime.now() - analyze_start
@@ -456,9 +586,18 @@ class BidDetectionOrchestrator:
                     feature.image_hashes + all_page_hashes
                 ))
                 self.cache.store_document(feature)
+                # 扫描版 PDF：OCR 是必须的（提取文字用于后续文本比对）
+                ocr_count = self._phase1_ocr_pages(
+                    file_path, doc_id, page_count, force=True
+                )
+                # OCR 文字聚合为段落 → 注入文本匹配管线
+                ocr_para_count = self._aggregate_ocr_to_paragraphs(
+                    doc_id, page_count
+                )
                 logger.info(
                     f"Phase 1 完成 (扫描版): {filename} "
-                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希)"
+                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
+                    f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
             else:
                 # 完全没有文本，只存图片哈希
@@ -482,9 +621,17 @@ class BidDetectionOrchestrator:
                     chunk_count=0,
                 )
                 self.cache.store_document(feature)
+                # 纯扫描版 PDF：OCR 是唯一的文字来源
+                ocr_count = self._phase1_ocr_pages(
+                    file_path, doc_id, page_count, force=True
+                )
+                ocr_para_count = self._aggregate_ocr_to_paragraphs(
+                    doc_id, page_count
+                )
                 logger.info(
                     f"Phase 1 完成 (纯扫描版): {filename} "
-                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希)"
+                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
+                    f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
             return
 
@@ -538,6 +685,12 @@ class BidDetectionOrchestrator:
 
             # 更新文档特征
             self.cache.store_document(feature)
+
+            # 自动 OCR：对页面图片提取文字（如有图片且 OCR 启用）
+            ocr_count = self._phase1_ocr_pages(
+                file_path, doc_id, page_count
+            )
+
             logger.info(
                 f"Phase 1 完成: {filename} "
                 f"({page_count} 页, {len(chunks)} 块, "
@@ -546,7 +699,300 @@ class BidDetectionOrchestrator:
             )
 
     # ============================================================
-    # Phase 3: 单对分析
+    # Phase 1 OCR: 自动页面图片文字提取
+    # ============================================================
+
+    def _phase1_ocr_pages(
+        self, file_path: str, doc_id: str, page_count: int,
+        force: bool = False,
+    ) -> int:
+        """对 PDF 中的图片运行 OCR 提取文字
+
+        两种模式:
+        - 扫描版 (force=True): 渲染整页为图片 → OCR（页面本身就是图片）
+        - 文本版 (force=False): 提取嵌入图片 → 逐个 OCR（只识别图片中的文字）
+
+        Returns:
+            成功 OCR 的图片数
+        """
+        if not self.config.ENABLE_OCR:
+            return 0
+        if not self.ocr_engine.is_available:
+            logger.debug("OCR 引擎不可用，跳过图片文字提取")
+            return 0
+
+        # 如果已有 OCR 结果，跳过（避免重复）
+        if not force:
+            existing_ocr = self.cache.load_image_ocr_results(doc_id)
+            if existing_ocr:
+                logger.debug(
+                    f"OCR: {os.path.basename(file_path)} 已有 "
+                    f"{len(existing_ocr)} 条结果，跳过"
+                )
+                return len(existing_ocr)
+
+        import fitz
+        from PIL import Image
+        import io
+        import imagehash
+        import numpy as np
+
+        logger.info(
+            f"OCR: {'扫描版全页' if force else '嵌入图片'}模式 "
+            f"{os.path.basename(file_path)} ({page_count} 页)..."
+        )
+
+        ocr_count = 0
+        sample_step = self.config.OCR_SAMPLE_STEP
+        min_conf = self.config.OCR_MIN_CONFIDENCE
+
+        try:
+            doc = fitz.open(file_path)
+        except Exception as e:
+            logger.error(f"OCR: 无法打开 PDF ({file_path}): {e}")
+            return 0
+
+        try:
+            for page_num in range(0, page_count, sample_step):
+                try:
+                    page = doc[page_num]
+
+                    if force:
+                        # === 扫描版：渲染整页 → OCR ===
+                        pix = page.get_pixmap(dpi=150)
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        phash = str(imagehash.phash(img))
+                        img_array = np.array(img)
+
+                        ocr_result = self.ocr_engine.extract(img_array)
+                        ocr_result.image_hash = phash
+
+                        if ocr_result.confidence >= min_conf and ocr_result.text.strip():
+                            self.cache.store_image_ocr_result(
+                                doc_id=doc_id, page_num=page_num,
+                                image_hash=phash,
+                                ocr_text=ocr_result.text,
+                                ocr_words=ocr_result.words,
+                                bboxes=ocr_result.bboxes,
+                                confidence=ocr_result.confidence,
+                            )
+                            ocr_count += 1
+                    else:
+                        # === 文本版：渲染页面 → 裁剪图片区域 → OCR ===
+                        # 使用 get_image_info() 获取图片在页面上的位置，
+                        # 然后从页面渲染图中裁剪出来。比 extract_image()
+                        # 更可靠（extract_image 可能丢失颜色/透明度信息）。
+                        image_info_list = page.get_image_info()
+                        if not image_info_list:
+                            continue
+
+                        # 过滤太小的装饰图，收集有效图片区域
+                        valid_images = []
+                        min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
+                        for info in image_info_list:
+                            w = info.get('width', 0)
+                            h = info.get('height', 0)
+                            if w >= min_size and h >= min_size:
+                                valid_images.append(info)
+
+                        if not valid_images:
+                            continue
+
+                        # 渲染整页一次（200 DPI），然后裁剪各图片区域
+                        OCR_DPI = 200
+                        scale = OCR_DPI / 72.0
+                        pix = page.get_pixmap(dpi=OCR_DPI)
+                        full_img = Image.open(io.BytesIO(
+                            pix.tobytes("png")
+                        ))
+
+                        for info in valid_images:
+                            try:
+                                bbox = info.get('bbox', (0, 0, 0, 0))
+                                x0, y0, x1, y1 = bbox
+
+                                # 页面坐标 → 像素坐标
+                                px0 = int(x0 * scale)
+                                py0 = int(y0 * scale)
+                                px1 = int(x1 * scale)
+                                py1 = int(y1 * scale)
+
+                                # 裁剪
+                                crop = full_img.crop((px0, py0, px1, py1))
+                                if crop.size[0] < 10 or crop.size[1] < 10:
+                                    continue
+
+                                phash = str(imagehash.phash(crop))
+                                img_array = np.array(crop)
+
+                                ocr_result = self.ocr_engine.extract(img_array)
+                                ocr_result.image_hash = phash
+
+                                if ocr_result.confidence < min_conf:
+                                    continue
+                                if not ocr_result.text.strip():
+                                    continue
+
+                                self.cache.store_image_ocr_result(
+                                    doc_id=doc_id, page_num=page_num,
+                                    image_hash=phash,
+                                    ocr_text=ocr_result.text,
+                                    ocr_words=ocr_result.words,
+                                    bboxes=ocr_result.bboxes,
+                                    confidence=ocr_result.confidence,
+                                )
+                                ocr_count += 1
+
+                            except Exception as e:
+                                logger.debug(
+                                    f"OCR: 第 {page_num} 页裁剪区失败: {e}"
+                                )
+                                continue
+
+                except Exception as e:
+                    logger.debug(
+                        f"OCR: 第 {page_num} 页失败 "
+                        f"({os.path.basename(file_path)}): {e}"
+                    )
+                    continue
+
+        finally:
+            doc.close()
+
+        if ocr_count > 0:
+            logger.info(
+                f"OCR: {os.path.basename(file_path)} — "
+                f"{ocr_count} 张图片成功提取文字"
+            )
+
+        return ocr_count
+
+    # ============================================================
+    # Phase 1 OCR 聚合: OCR 文字 → 段落 → MinHash → 文本匹配管线
+    # ============================================================
+
+    def _aggregate_ocr_to_paragraphs(
+        self, doc_id: str, page_count: int
+    ) -> int:
+        """将 OCR 结果聚合为段落并注入文本匹配管线
+
+        OCR 文字提取后，需要转换为段落结构才能参与下游的
+        LSH 候选筛选、SBERT 嵌入编码、段落匹配等流程。
+
+        流程:
+        1. 从 SQLite 加载 OCR 结果
+        2. 拼接所有页面 OCR 文字
+        3. 调用 extractor._split_paragraphs() 分段
+        4. 计算每段的 MinHash
+        5. 创建虚拟 ChunkResult 存入 SQLite（段落自动写入）
+        6. 更新 BidFeature: text_length, simhash, doc_minhash
+
+        Returns:
+            创建的段落数量（0 = 无可用 OCR 文字）
+        """
+        import jieba
+        from data_structures import ChunkResult
+
+        # 1. 加载 OCR 结果
+        ocr_results = self.cache.load_image_ocr_results(doc_id)
+        if not ocr_results:
+            logger.debug(f"OCR 聚合: {doc_id} 无 OCR 结果，跳过")
+            return 0
+
+        # 2. 按页码排序，拼接所有 OCR 文字
+        ocr_sorted = sorted(ocr_results, key=lambda r: r.get('page_num', 0))
+        all_text = "\n".join(
+            r['ocr_text'] for r in ocr_sorted
+            if r.get('ocr_text', '').strip()
+        )
+        if not all_text.strip():
+            logger.debug(f"OCR 聚合: {doc_id} OCR 文字为空，跳过")
+            return 0
+
+        logger.info(
+            f"OCR 聚合: {doc_id} — {len(all_text)} 字符, "
+            f"{len(ocr_results)} 页 OCR 结果"
+        )
+
+        # 3. 分段（复用 extractor 的 _split_paragraphs）
+        paragraphs = self.extractor._split_paragraphs(all_text)
+        if not paragraphs:
+            logger.debug(f"OCR 聚合: {doc_id} 无法分段，跳过")
+            return 0
+
+        # 4. 分词 + 预计算词哈希缓存（复用 extractor 的 hash functions）
+        stopwords = self.extractor.stopwords
+        all_tokens = [
+            w for w in jieba.cut(all_text)
+            if w not in stopwords and len(w) > 1
+        ]
+
+        # 预计算所有唯一词的哈希值（避免每段重复计算）
+        word_hash_cache = {}
+        unique_words = set(all_tokens)
+        for w in unique_words:
+            word_hash_cache[w] = [
+                hf(w) for hf in self.extractor._minhash_funcs
+            ]
+
+        # 5. 计算每段的 MinHash
+        paragraph_hashes = []
+        for para in paragraphs:
+            para_words = [
+                w for w in jieba.cut(para)
+                if w not in stopwords and len(w) > 1
+            ]
+            para_hash = self.extractor._compute_minhash_cached(
+                para_words, word_hash_cache
+            )
+            paragraph_hashes.append(para_hash)
+
+        # 6. 计算文档级 SimHash
+        simhash = (
+            self.extractor._compute_simhash_from_tokens(all_tokens)
+            if all_tokens else "0" * 16
+        )
+
+        # 7. 提取报价
+        quotes = self.extractor._extract_quotes(all_text)
+
+        # 8. 创建虚拟 ChunkResult（使用 OCR_CHUNK_INDEX 避免与文本块冲突）
+        chunk_result = ChunkResult(
+            doc_id=doc_id,
+            chunk_index=self.OCR_CHUNK_INDEX,
+            start_page=0,
+            end_page=page_count - 1 if page_count > 0 else 0,
+            text=all_text,
+            paragraphs=paragraphs,
+            paragraph_hashes=paragraph_hashes,
+            simhash=simhash,
+            quotes=quotes,
+            image_hashes=[],
+        )
+
+        # 存储到 SQLite（段落自动写入 paragraphs 表）
+        self.cache.store_chunk(chunk_result)
+
+        # 9. 更新 BidFeature（填充 text_length, simhash, doc_minhash）
+        feature = self.cache.load_document(doc_id)
+        if feature:
+            doc_minhash = self.text_processor._aggregate_minhash(paragraph_hashes)
+            feature.text_length = len(all_text)
+            feature.text_simhash = simhash
+            feature.doc_minhash = doc_minhash
+            feature.chunk_count = 1
+            self.cache.store_document(feature)
+            logger.info(
+                f"OCR 聚合完成: {doc_id} → {len(paragraphs)} 段, "
+                f"MinHash 已填充"
+            )
+        else:
+            logger.warning(f"OCR 聚合: {doc_id} 文档特征未找到，无法更新")
+
+        return len(paragraphs)
+
+    # ============================================================
+    # Phase 1.5 / Phase 3: 嵌入编码 + 单对分析
     # ============================================================
 
     def _phase_embed(self, state) -> None:
@@ -576,25 +1022,82 @@ class BidDetectionOrchestrator:
         logger.info(f"Phase 1.5: 准备编码 {len(features)} 个文档的段落嵌入")
         total_paragraphs = 0
 
-        for doc_feat in features:
-            if doc_feat.is_scanned:
-                continue
-            try:
-                paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
-                if paragraphs:
-                    count = engine.encode_document(
-                        doc_feat.doc_id, paragraphs, self.cache
-                    )
-                    total_paragraphs += count
-                else:
-                    logger.debug(
-                        f"Phase 1.5: {doc_feat.filename} 无段落文本，跳过"
-                    )
-            except Exception as e:
-                logger.error(
-                    f"嵌入编码失败 ({doc_feat.filename}): {e}", exc_info=True
+        # 筛选需要编码的文档（有 MinHash = 有文本）
+        embed_doc_ids = [
+            f.doc_id for f in features if f.doc_minhash
+        ]
+
+        if not embed_doc_ids:
+            logger.info("Phase 1.5: 没有需要编码的文档")
+        else:
+            num_embed_workers = min(
+                self.config.EMBED_WORKERS,
+                len(embed_doc_ids),
+                os.cpu_count() or 4,
+            )
+
+            if num_embed_workers <= 1:
+                # === 串行路径 ===
+                for doc_feat in features:
+                    if not doc_feat.doc_minhash:
+                        continue
+                    try:
+                        paragraphs = self.cache.load_all_paragraphs_text(
+                            doc_feat.doc_id
+                        )
+                        if paragraphs:
+                            count = engine.encode_document(
+                                doc_feat.doc_id, paragraphs, self.cache
+                            )
+                            total_paragraphs += count
+                        else:
+                            logger.debug(
+                                f"Phase 1.5: {doc_feat.filename} 无段落文本，跳过"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"嵌入编码失败 ({doc_feat.filename}): {e}",
+                            exc_info=True,
+                        )
+                        continue
+            else:
+                # === 并行路径 (ProcessPoolExecutor) ===
+                logger.info(
+                    f"Phase 1.5 并行模式: {num_embed_workers} workers, "
+                    f"{len(embed_doc_ids)} 个文档"
                 )
-                continue
+                from pipeline.parallel_workers import embed_single_worker
+
+                config_dict = self._get_picklable_config()
+                db_dir = self.config.CACHE_DIR
+
+                with ProcessPoolExecutor(max_workers=num_embed_workers) as executor:
+                    future_to_doc = {
+                        executor.submit(
+                            embed_single_worker,
+                            (doc_id, config_dict, db_dir)
+                        ): doc_id
+                        for doc_id in embed_doc_ids
+                    }
+
+                    for future in as_completed(future_to_doc):
+                        doc_id = future_to_doc[future]
+                        try:
+                            result = future.result()
+                            if result['success']:
+                                total_paragraphs += result.get(
+                                    'paragraphs_encoded', 0
+                                )
+                            else:
+                                logger.error(
+                                    f"嵌入编码失败 ({doc_id}): "
+                                    f"{result.get('error', 'unknown')}"
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Embed worker 异常 ({doc_id}): {e}",
+                                exc_info=True,
+                            )
 
         state.phase = 3
         self.checkpoint.save(state)
@@ -615,13 +1118,25 @@ class BidDetectionOrchestrator:
             logger.error(f"文档未找到: {doc_a_id} / {doc_b_id}")
             return
 
-        if doc_a.is_scanned or doc_b.is_scanned:
-            logger.info(
-                f"扫描版文档对: {doc_a.filename} vs {doc_b.filename}, "
-                f"跳过文本分析（图片比对功能后续版本实现）"
-            )
-            self.cache.mark_pair_processed(doc_a_id, doc_b_id)
-            return
+        # 检查是否有可用文字（MinHash 为空 = 无文字可用）
+        if not doc_a.doc_minhash or not doc_b.doc_minhash:
+            if doc_a.is_scanned or doc_b.is_scanned:
+                # 纯扫描版文档（OCR 无结果）：仅进行图片比对
+                logger.info(
+                    f"纯扫描文档对（无 OCR 文字）: "
+                    f"{doc_a.filename} vs {doc_b.filename}, 仅图片比对"
+                )
+                self._phase3_image_only(doc_a, doc_b, doc_a_id, doc_b_id)
+                return
+            else:
+                # 非扫描版文档缺少 MinHash = 数据异常
+                logger.warning(
+                    f"文档缺少 MinHash 签名: "
+                    f"{doc_a.filename} / {doc_b.filename}, 跳过"
+                )
+                self.cache.mark_pair_processed(doc_a_id, doc_b_id)
+                return
+        # 有 MinHash 的文档（含 OCR 成功的扫描版）进入正常文本分析流程
 
         pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
 
@@ -676,18 +1191,7 @@ class BidDetectionOrchestrator:
         )
 
         # 元数据证据
-        metadata_evidence = MetadataEvidence()
-        fields_to_check = ['author', 'creator', 'producer', 'software_fingerprint']
-        for field in fields_to_check:
-            val_a = getattr(doc_a.metadata, field, '').lower().strip()
-            val_b = getattr(doc_b.metadata, field, '').lower().strip()
-            if val_a and val_b and val_a == val_b:
-                metadata_evidence.matched_fields.append(field)
-                metadata_evidence.matched_values[field] = val_a
-        if doc_a.metadata.time_bucket and doc_b.metadata.time_bucket:
-            metadata_evidence.same_time_bucket = (
-                doc_a.metadata.time_bucket == doc_b.metadata.time_bucket
-            )
+        metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
 
         # 图片证据（增强版：四层检测）
         image_evidence = self._build_image_evidence(doc_a, doc_b)
@@ -697,6 +1201,65 @@ class BidDetectionOrchestrator:
             metadata_evidence=metadata_evidence,
             image_evidence=image_evidence,
         )
+
+    @staticmethod
+    def _build_metadata_evidence(
+        doc_a: BidFeature, doc_b: BidFeature
+    ) -> MetadataEvidence:
+        """构建元数据证据（提取为独立方法，供文本和图片路径复用）"""
+        evidence = MetadataEvidence()
+        fields_to_check = ['author', 'creator', 'producer', 'software_fingerprint']
+        for field in fields_to_check:
+            val_a = getattr(doc_a.metadata, field, '').lower().strip()
+            val_b = getattr(doc_b.metadata, field, '').lower().strip()
+            if val_a and val_b and val_a == val_b:
+                evidence.matched_fields.append(field)
+                evidence.matched_values[field] = val_a
+        if doc_a.metadata.time_bucket and doc_b.metadata.time_bucket:
+            evidence.same_time_bucket = (
+                doc_a.metadata.time_bucket == doc_b.metadata.time_bucket
+            )
+        return evidence
+
+    def _phase3_image_only(
+        self, doc_a: BidFeature, doc_b: BidFeature,
+        doc_a_id: str, doc_b_id: str
+    ):
+        """Phase 3 纯图片比对路径（无文字可用的扫描版文档对）
+
+        当两个文档都没有 OCR 文字可用时，仅进行图片哈希比对
+        和元数据匹配，文本证据留空。
+        """
+        pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+
+        # 图片证据（四层检测）
+        image_evidence = self._build_image_evidence(doc_a, doc_b)
+
+        # 元数据证据
+        metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
+
+        evidence = EvidenceChain(
+            text_evidence=TextEvidence(),
+            metadata_evidence=metadata_evidence,
+            image_evidence=image_evidence,
+        )
+
+        result = PairwiseResult(
+            pair_id=pair_id,
+            doc_a_id=doc_a_id,
+            doc_b_id=doc_b_id,
+            similarity_scores={
+                'text_local': 0.0,
+                'metadata_match': len(metadata_evidence.matched_fields),
+                'image_common': image_evidence.common_image_count,
+            },
+            evidence=evidence,
+        )
+
+        # 风险评分
+        result = self.scoring_engine._score_pair(result)
+        self.cache.store_pairwise_result(result)
+        self.cache.mark_pair_processed(doc_a_id, doc_b_id)
 
     def _build_image_evidence(
         self, doc_a: BidFeature, doc_b: BidFeature
@@ -727,6 +1290,7 @@ class BidDetectionOrchestrator:
                 words=r['ocr_words'],
                 bboxes=r['bboxes'],
                 confidence=r['confidence'],
+                image_hash=r.get('image_hash', ''),
             ) for r in ocr_a
         ]
         ocr_objects_b = [
@@ -735,6 +1299,7 @@ class BidDetectionOrchestrator:
                 words=r['ocr_words'],
                 bboxes=r['bboxes'],
                 confidence=r['confidence'],
+                image_hash=r.get('image_hash', ''),
             ) for r in ocr_b
         ]
 

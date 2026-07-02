@@ -8,7 +8,7 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any
+from typing import Any
 from dataclasses import asdict
 
 from data_structures import GlobalReport
@@ -30,13 +30,7 @@ class ReportGenerator:
         # 1. 生成JSON报告
         self._generate_json_report(report, output_dir)
 
-        # 2. 生成详细文本摘要报告（包含完整段落和高亮）
-        self._generate_summary_report(report, output_dir)
-
-        # 3. 生成CSV表格
-        # self._generate_csv_report(report, output_dir)
-
-        # 4. 生成HTML可视化报告
+        # 2. 生成HTML可视化报告
         self._generate_html_report(report, output_dir)
 
         logger.info(f"报告已生成到: {output_dir}")
@@ -66,201 +60,6 @@ class ReportGenerator:
         else:
             return obj
 
-    def _generate_summary_report(self, report: GlobalReport, output_dir: str) -> None:
-        """生成详细文本摘要报告 — 完整输出所有相似段落的详细文本内容"""
-        summary_path = os.path.join(output_dir, "summary.txt")
-
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            # ========== 报告头部 ==========
-            f.write("=" * 80 + "\n")
-            f.write("投标文件串标围标检测报告 — 详细相似内容\n")
-            f.write("=" * 80 + "\n\n")
-
-            f.write(f"报告ID: {report.report_id}\n")
-            f.write(f"生成时间: {report.generated_at}\n")
-            f.write(f"检测文件总数: {report.total_files}\n")
-            f.write(f"可疑文档对数量: {report.suspicious_pairs}\n")
-            f.write(f"高风险文档对数量: {report.high_risk_pairs}\n\n")
-
-            # ========== 相似文档对详情 ==========
-            all_results = report.pairwise_results
-            all_results.sort(key=lambda x: x.risk_score, reverse=True)
-
-            if not all_results:
-                f.write("未发现相似文档对。\n")
-            else:
-                pair_index = 0
-                for result in all_results:
-                    text_local = result.similarity_scores.get('text_local', 0)
-                    if text_local < 0.3:
-                        continue
-
-                    pair_index += 1
-                    profile_a = report.file_profiles.get(result.doc_a_id)
-                    profile_b = report.file_profiles.get(result.doc_b_id)
-                    evidence = result.evidence
-                    para_matches = evidence.text_evidence.paragraph_matches
-                    clone_blocks = evidence.text_evidence.continuous_clone_blocks
-                    total_matches = len(para_matches)
-
-                    # 获取文件名
-                    filename_a = profile_a.filename if profile_a else result.doc_a_id
-                    filename_b = profile_b.filename if profile_b else result.doc_b_id
-
-                    # ===== 文档对标题 =====
-                    f.write("\n")
-                    f.write("=" * 80 + "\n")
-                    f.write(f"相似文档对 #{pair_index}\n")
-                    f.write("=" * 80 + "\n\n")
-
-                    f.write(f"📄 文档A: {filename_a}\n")
-                    f.write(f"📄 文档B: {filename_b}\n")
-                    f.write(f"📊 整体文本相似度: {text_local:.4f}  ({self._format_similarity(text_local)})\n")
-                    f.write(f"⚠ 风险等级: {result.risk_level}\n")
-                    f.write(f"📝 相似段落总数: {total_matches} 对\n")
-                    f.write(f"🔗 连续克隆块数量: {len(clone_blocks)} 个\n\n")
-
-                    if total_matches == 0:
-                        f.write("（无相似段落详情）\n")
-                        continue
-
-                    # 按相似度排序
-                    sorted_matches = sorted(
-                        para_matches,
-                        key=lambda x: x.get('similarity', 0),
-                        reverse=True
-                    )
-
-                    # 收集属于克隆块的匹配对
-                    clone_match_keys = set()
-                    for block in clone_blocks:
-                        for pair in block.get('pairs', []):
-                            clone_match_keys.add((pair['a_index'], pair['b_index']))
-
-                    # ===== 先展示连续克隆块 =====
-                    if clone_blocks:
-                        f.write("┌" + "─" * 76 + "┐\n")
-                        f.write("│  ⚠ 连续克隆块 — 连续雷同段落（最强围标证据）".ljust(77) + "│\n")
-                        f.write("└" + "─" * 76 + "┘\n\n")
-
-                        for block in clone_blocks:
-                            block_id = block.get('group_id', '?')
-                            block_len = block.get('length', 0)
-                            block_sim = block.get('similarity', 0)
-
-                            f.write(f"  █ 克隆块 [{block_id}] — "
-                                    f"连续 {block_len} 段雷同，平均相似度 {block_sim:.4f}\n")
-                            f.write(f"  {'─' * 70}\n")
-
-                            # 找到该克隆块中的所有匹配
-                            block_pairs_keys = [
-                                (p['a_index'], p['b_index']) for p in block.get('pairs', [])
-                            ]
-                            block_matches = [
-                                m for m in sorted_matches
-                                if (m.get('paragraph_a_index'), m.get('paragraph_b_index')) in block_pairs_keys
-                            ]
-
-                            for bm_idx, bm in enumerate(block_matches, 1):
-                                f.write(f"\n  【克隆对 {bm_idx}/{len(block_matches)}】\n")
-                                self._write_full_paragraph_detail(
-                                    f, bm, filename_a, filename_b, indent="  "
-                                )
-
-                            f.write(f"\n  {'─' * 70}\n")
-
-                    # ===== 再展示其他独立相似段落 =====
-                    non_clone_matches = [
-                        m for m in sorted_matches
-                        if (m.get('paragraph_a_index'), m.get('paragraph_b_index')) not in clone_match_keys
-                    ]
-
-                    if non_clone_matches:
-                        f.write("\n┌" + "─" * 76 + "┐\n")
-                        f.write(f"│  📝 其他相似段落（共 {len(non_clone_matches)} 对）".ljust(77) + "│\n")
-                        f.write("└" + "─" * 76 + "┘\n\n")
-
-                        for nm_idx, nm in enumerate(non_clone_matches, 1):
-                            f.write(f"  【独立匹配 {nm_idx}/{len(non_clone_matches)}】\n")
-                            self._write_full_paragraph_detail(
-                                f, nm, filename_a, filename_b, indent="  "
-                            )
-
-            # ========== 报告结束 ==========
-            f.write("\n" + "=" * 80 + "\n")
-            f.write("报告结束 — 以上为所有检测到的相似文档对及详细相似内容\n")
-            f.write("=" * 80 + "\n")
-
-        logger.info(f"详细摘要报告已生成: {summary_path}")
-
-    def _write_full_paragraph_detail(self, f, match: dict,
-                                      filename_a: str, filename_b: str,
-                                      indent: str = ""):
-        """写入单个段落匹配的完整详细信息（无截断）
-
-        Args:
-            f: 文件句柄
-            match: 段落匹配字典
-            filename_a: 文档A的文件名
-            filename_b: 文档B的文件名
-            indent: 缩进字符串
-        """
-        sim = match.get('similarity', 0)
-        method = match.get('detection_method', '?')
-        idx_a = match.get('paragraph_a_index', '?')
-        idx_b = match.get('paragraph_b_index', '?')
-
-        f.write(f"{indent}文档A [{filename_a}] 第 [{idx_a}] 段\n")
-        f.write(f"{indent}文档B [{filename_b}] 第 [{idx_b}] 段\n")
-        f.write(f"{indent}相似度: {sim:.4f}  检测方法: {method}\n")
-
-        # --- 共同文本片段（全部输出，不截断） ---
-        common_parts = match.get('common_parts', [])
-        if common_parts:
-            f.write(f"\n{indent}▸ 两段共同部分（共 {len(common_parts)} 处）:\n")
-            for k, part in enumerate(common_parts, 1):
-                f.write(f"{indent}   [{k}] {part}\n")
-
-        # --- 高亮文本A（【】内为与文档B相同的内容） ---
-        highlighted_a = match.get('highlighted_text_a', '')
-        if highlighted_a:
-            f.write(f"\n{indent}▸ 文档A [{filename_a}] 第 [{idx_a}] 段 "
-                    f"（【】内为与文档B相同的内容）:\n")
-            f.write(f"{indent}  ┌" + "─" * 70 + "┐\n")
-            for line in highlighted_a.split('\n'):
-                f.write(f"{indent}  │ {line}\n")
-            f.write(f"{indent}  └" + "─" * 70 + "┘\n")
-
-        # --- 高亮文本B（【】内为与文档A相同的内容） ---
-        highlighted_b = match.get('highlighted_text_b', '')
-        if highlighted_b:
-            f.write(f"\n{indent}▸ 文档B [{filename_b}] 第 [{idx_b}] 段 "
-                    f"（【】内为与文档A相同的内容）:\n")
-            f.write(f"{indent}  ┌" + "─" * 70 + "┐\n")
-            for line in highlighted_b.split('\n'):
-                f.write(f"{indent}  │ {line}\n")
-            f.write(f"{indent}  └" + "─" * 70 + "┘\n")
-
-        # --- 文档A原始完整文本（仅在高亮不可用时作为后备） ---
-        para_a = match.get('paragraph_a', '')
-        if para_a and not highlighted_a:
-            f.write(f"\n{indent}▸ 文档A [{filename_a}] 第 [{idx_a}] 段 完整原文:\n")
-            f.write(f"{indent}  ┌" + "─" * 70 + "┐\n")
-            for line in para_a.split('\n'):
-                f.write(f"{indent}  │ {line}\n")
-            f.write(f"{indent}  └" + "─" * 70 + "┘\n")
-
-        # --- 文档B原始完整文本（仅在高亮不可用时作为后备） ---
-        para_b = match.get('paragraph_b', '')
-        if para_b and not highlighted_b:
-            f.write(f"\n{indent}▸ 文档B [{filename_b}] 第 [{idx_b}] 段 完整原文:\n")
-            f.write(f"{indent}  ┌" + "─" * 70 + "┐\n")
-            for line in para_b.split('\n'):
-                f.write(f"{indent}  │ {line}\n")
-            f.write(f"{indent}  └" + "─" * 70 + "┘\n")
-
-        f.write(f"{indent}{'─' * 70}\n")
-
     def _format_similarity(self, similarity: float) -> str:
         """格式化相似度描述"""
         if similarity >= 0.95:
@@ -275,49 +74,6 @@ class ReportGenerator:
             return "略有相似"
         else:
             return "基本不相似"
-
-    def _generate_csv_report(self, report: GlobalReport, output_dir: str) -> None:
-        """生成CSV格式的可疑对列表"""
-        csv_path = os.path.join(output_dir, "suspicious_pairs.csv")
-
-        all_results = report.pairwise_results
-        all_results.sort(key=lambda x: x.risk_score, reverse=True)
-
-        with open(csv_path, 'w', encoding='utf-8-sig') as f:
-            f.write("序号,文档A,文档B,文本相似度,相似度等级,风险评级,"
-                    "相似段落数,连续克隆块数,最高单段相似度,检测详情\n")
-
-            idx = 0
-            for result in all_results:
-                text_local = result.similarity_scores.get('text_local', 0)
-                if text_local < 0.3:
-                    continue
-
-                idx += 1
-                profile_a = report.file_profiles.get(result.doc_a_id)
-                profile_b = report.file_profiles.get(result.doc_b_id)
-
-                filename_a = profile_a.filename if profile_a else result.doc_a_id
-                filename_b = profile_b.filename if profile_b else result.doc_b_id
-
-                evidence = result.evidence
-                para_count = len(evidence.text_evidence.paragraph_matches)
-                clone_count = len(evidence.text_evidence.continuous_clone_blocks)
-
-                # 最高单段相似度
-                max_para_sim = 0.0
-                if evidence.text_evidence.paragraph_matches:
-                    max_para_sim = max(
-                        m.get('similarity', 0) for m in evidence.text_evidence.paragraph_matches
-                    )
-
-                risk_factors_str = "; ".join(result.risk_factors[:5])
-
-                f.write(f'{idx},"{filename_a}","{filename_b}",{text_local:.4f},'
-                       f'{self._format_similarity(text_local)},{result.risk_level},'
-                       f'{para_count},{clone_count},{max_para_sim:.4f},"{risk_factors_str}"\n')
-
-        logger.info(f"CSV报告已生成: {csv_path}")
 
     def _generate_html_report(self, report: GlobalReport, output_dir: str) -> None:
         """生成HTML可视化报告（新增）
@@ -452,6 +208,9 @@ summary:hover {{ background: #bbdefb; }}
 <div><strong>📎 克隆块:</strong> {len(clone_blocks)} 个</div>
 </div>""")
 
+                # === 图片雷同证据（HTML） ===
+                self._append_image_evidence_html(parts, evidence.image_evidence)
+
                 if not para_matches:
                     parts.append("<p>（无相似段落详情）</p></div>")
                     continue
@@ -518,6 +277,42 @@ summary:hover {{ background: #bbdefb; }}
 </html>""")
 
         return ''.join(parts)
+
+    @staticmethod
+    def _append_image_evidence_html(parts: list, image_ev) -> None:
+        """追加图片雷同证据到 HTML 片段列表"""
+        if not (getattr(image_ev, 'exact_image_count', 0) > 0
+                or getattr(image_ev, 'near_identical_count', 0) > 0
+                or getattr(image_ev, 'similar_image_count', 0) > 0
+                or getattr(image_ev, 'ps_suspicious', False)
+                or getattr(image_ev, 'shared_typo_count', 0) > 0
+                or getattr(image_ev, 'text_identical_count', 0) > 0
+                or getattr(image_ev, 'text_similar_count', 0) > 0):
+            return
+
+        ie = image_ev
+        parts.append("<div class='section-title'>📷 图片雷同证据</div>")
+        parts.append("<div style='margin:10px 0;'>")
+
+        if getattr(ie, 'exact_image_count', 0) > 0:
+            parts.append(f"<p><strong>完全相同图片:</strong> {ie.exact_image_count} 对</p>")
+        if getattr(ie, 'near_identical_count', 0) > 0:
+            parts.append(f"<p><strong>高度相似图片:</strong> {ie.near_identical_count} 对</p>")
+        if getattr(ie, 'similar_image_count', 0) > 0:
+            parts.append(f"<p><strong>相似图片:</strong> {ie.similar_image_count} 对</p>")
+        if getattr(ie, 'ps_suspicious', False):
+            parts.append(f"<p><strong>⚠ PS嫌疑:</strong> {ie.ps_suspicious_count} 对图片文字相同但图片特征不同</p>")
+        if getattr(ie, 'shared_typo_count', 0) > 0:
+            typos_str = ', '.join(getattr(ie, 'shared_typos', [])[:5])
+            parts.append(f"<p><strong>相同错别字:</strong> {ie.shared_typo_count} 个 "
+                         f"({typos_str}{'...' if ie.shared_typo_count > 5 else ''})</p>")
+        if getattr(ie, 'text_identical_count', 0) > 0:
+            parts.append(f"<p><strong>图片文字完全相同:</strong> {ie.text_identical_count} 对</p>")
+        if getattr(ie, 'text_similar_count', 0) > 0:
+            parts.append(f"<p><strong>图片文字高度相似:</strong> {ie.text_similar_count} 对</p>")
+
+        parts.append(f"<p><strong>图片风险分:</strong> {getattr(ie, 'image_risk_score', 0)}/30</p>")
+        parts.append("</div>")
 
     def _build_match_html(self, match: dict, filename_a: str, filename_b: str,
                            is_clone: bool = False) -> str:

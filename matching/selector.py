@@ -44,7 +44,7 @@ class CandidatePairSelector:
         """
         candidate_pairs: dict = {}  # (id_a, id_b) -> (method, similarity)
 
-        valid_features = [f for f in features if not f.is_scanned]
+        valid_features = [f for f in features if f.doc_minhash]
         all_features = features
 
         # 小规模文档集直接全量比对

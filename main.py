@@ -10,9 +10,7 @@ os.environ['TRANSFORMERS_OFFLINE'] = '1'
 import sys
 import argparse
 import logging
-import glob
 from datetime import datetime
-from typing import List, Optional
 
 from config import load_config, DetectionConfig
 from scoring import RiskScoringEngine
@@ -56,14 +54,48 @@ def setup_logging(log_level: str = "INFO") -> None:
     logging.info(f"日志系统已初始化: 级别={log_level}, 最大文件大小=10MB, 保留备份=3个")
 
 
+def _print_startup_diagnostics(config: DetectionConfig) -> None:
+    """打印启动诊断信息"""
+    logger = logging.getLogger(__name__)
+    import platform
+
+    logger.info("=" * 60)
+    logger.info("启动诊断")
+    logger.info("=" * 60)
+    logger.info(f"Python 版本: {platform.python_version()}")
+    logger.info(f"平台: {platform.platform()}")
+
+    # GPU 检测
+    try:
+        import torch
+        cuda_ok = torch.cuda.is_available()
+        logger.info(f"PyTorch: {torch.__version__}, CUDA: {cuda_ok}")
+        if cuda_ok:
+            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    except ImportError:
+        logger.info("PyTorch: 未安装")
+
+    # 配置摘要
+    logger.info(f"OCR 引擎: {config.OCR_ENGINE}")
+    logger.info(f"OCR 离线模式: {config.OCR_OFFLINE_MODE}")
+    if config.OCR_MODEL_DIR:
+        logger.info(f"OCR 模型目录: {config.OCR_MODEL_DIR}")
+    if config.PADDLEOCR_HOME:
+        logger.info(f"PaddleOCR 缓存: {config.PADDLEOCR_HOME}")
+    logger.info(f"SBERT 设备: {config.SBERT_DEVICE}")
+    logger.info(f"并行: Phase1={config.PHASE1_WORKERS}, Phase3={config.PHASE3_WORKERS}")
+    logger.info(f"缓存禁用: {config.DISABLE_CACHE}")
+    logger.info("=" * 60)
+
+
 def main(input_dir: str, output_dir: str, config_path: str = None,
          log_level: str = "INFO", use_gpu: bool = False,
-         no_checkpoint: bool = False) -> None:
+         no_checkpoint: bool = False, offline: bool = False) -> None:
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
 
     logger.info("=" * 60)
-    logger.info("BatchBidCollusionDetector - 投标文件串标围标检测系统")
+    logger.info("BatchBidCollusionDetector - 投标文件串标围标检测")
     logger.info("=" * 60)
 
     try:
@@ -77,6 +109,15 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
         if no_checkpoint:
             config.ENABLE_CHECKPOINT = False
             logger.info("已禁用断点续传")
+        if offline:
+            config.OCR_OFFLINE_MODE = True
+            os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            logger.info("已启用离线模式")
+
+        # 打印启动诊断
+        _print_startup_diagnostics(config)
 
         logger.info(f"配置加载完成: MAX_WORKERS={config.MAX_WORKERS}, CHECKPOINT_INTERVAL={config.CHECKPOINT_INTERVAL}")
 
@@ -123,15 +164,15 @@ def parse_arguments():
     parser.add_argument(
         '--input',
         type=str,
-        required=True,
-        help='输入PDF文件目录路径'
+        required=False,
+        help='输入PDF文件目录路径 (--diagnose 模式不需要)'
     )
 
     parser.add_argument(
         '--output',
         type=str,
-        required=True,
-        help='输出报告目录路径'
+        required=False,
+        help='输出报告目录路径 (--diagnose 模式不需要)'
     )
 
     parser.add_argument(
@@ -163,11 +204,41 @@ def parse_arguments():
         help='禁用断点续传'
     )
 
+    parser.add_argument(
+        '--offline',
+        action='store_true',
+        default=False,
+        help='离线模式：禁止所有模型在线下载'
+    )
+
+    parser.add_argument(
+        '--diagnose',
+        action='store_true',
+        default=False,
+        help='仅运行环境诊断，不执行检测'
+    )
+
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_arguments()
+
+    # --diagnose 模式：仅打印诊断信息后退出
+    if args.diagnose:
+        setup_logging(args.log_level)
+        logger = logging.getLogger(__name__)
+        config = load_config(args.config)
+        if args.gpu:
+            config.USE_GPU = True
+        if args.offline:
+            config.OCR_OFFLINE_MODE = True
+        _print_startup_diagnostics(config)
+
+        # 打印 OCR 详细诊断
+        from image_analysis.image_ocr import ImageOCREngine
+        print(ImageOCREngine.diagnose())
+        sys.exit(0)
 
     if not os.path.exists(args.input):
         print(f"错误: 输入目录不存在: {args.input}")
@@ -186,4 +257,5 @@ if __name__ == "__main__":
         log_level=args.log_level,
         use_gpu=args.gpu,
         no_checkpoint=args.no_checkpoint,
+        offline=args.offline,
     )

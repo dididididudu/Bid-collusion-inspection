@@ -67,12 +67,17 @@ class PyMuPDFExtractor(BasePDFExtractor):
         return {'的', '了', '和', '是', '在', '有', '与', '为', '等', '及'}
 
     def _precreate_minhash_functions(self) -> list:
-        """预创建 MinHash 哈希函数"""
+        """预创建 MinHash 哈希函数
+
+        使用 hashlib.md5 确保跨进程确定性（Python hash() 因 PYTHONHASHSEED 随机化）。
+        """
+        import hashlib
         num_hash = self.config.MINHASH_NUM_HASHES_PARAGRAPH
 
         def make_hash_func(seed):
             def hash_func(s):
-                return hash((s, seed)) % (2 ** 32)
+                h = hashlib.md5(f'{s}:{seed}'.encode('utf-8')).hexdigest()
+                return int(h, 16) % (2 ** 32)
             return hash_func
 
         return [make_hash_func(i) for i in range(num_hash)]
@@ -283,9 +288,10 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     try:
                         # img_info: (xref, smask, width, height, bpc, colorspace, ...)
                         xref = img_info[0]
-                        # 过滤太小的图片（<100x100 像素，通常是图标/装饰）
+                        # 过滤太小的图片（默认 <50x50 像素，通常是图标/装饰）
                         width, height = img_info[2], img_info[3]
-                        if width < 100 or height < 100:
+                        min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
+                        if width < min_size or height < min_size:
                             continue
 
                         # 提取图片数据
@@ -545,14 +551,18 @@ class PyMuPDFExtractor(BasePDFExtractor):
         return any(re.match(p, line) for p in patterns)
 
     def _compute_simhash_from_tokens(self, word_list: list) -> str:
-        """从预分词的 token 列表计算 64 位 SimHash（避免重复 jieba 分词）"""
+        """从预分词的 token 列表计算 64 位 SimHash（避免重复 jieba 分词）
+
+        使用 hashlib.md5 确保跨进程确定性。
+        """
+        import hashlib
         if not word_list:
             return "0" * 16
 
         word_freq = Counter(word_list)
         v = [0] * 64
         for word, freq in word_freq.items():
-            word_hash = hash(word)
+            word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
             for i in range(64):
                 if (word_hash >> i) & 1:
                     v[i] += freq
@@ -565,15 +575,6 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 simhash_int |= (1 << i)
 
         return format(simhash_int, '016x')
-
-    def _compute_simhash(self, text: str) -> str:
-        """计算 64 位 SimHash（保留用于向后兼容）"""
-        if not text:
-            return "0" * 16
-
-        words = jieba.cut(text)
-        word_list = [w for w in words if w not in self.stopwords and len(w) > 1]
-        return self._compute_simhash_from_tokens(word_list)
 
     def _compute_minhash_cached(self, words: list, word_hash_cache: dict) -> str:
         """使用预计算的词哈希缓存计算 MinHash 签名（避免重复 hash_func 调用）
@@ -604,25 +605,6 @@ class PyMuPDFExtractor(BasePDFExtractor):
             for i in range(num_hashes):
                 if cached[i] < values[i]:
                     values[i] = cached[i]
-
-        return ','.join(map(str, values))
-
-    def _compute_minhash(self, text: str) -> str:
-        """计算段落 MinHash 签名（保留用于向后兼容）"""
-        words = list(jieba.cut(text))
-        words = set([w for w in words if w not in self.stopwords and len(w) > 1])
-
-        if not words:
-            return ""
-
-        values = []
-        for hash_func in self._minhash_funcs:
-            min_val = float('inf')
-            for w in words:
-                h = hash_func(w)
-                if h < min_val:
-                    min_val = h
-            values.append(min_val)
 
         return ','.join(map(str, values))
 

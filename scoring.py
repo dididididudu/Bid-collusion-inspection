@@ -139,6 +139,32 @@ class RiskScoringEngine:
             risk_level = "LOW"
             risk_factors.append("未发现显著相似段落")
 
+        # === 图片风险上调：图片证据独立影响风险等级 ===
+        if image_score >= 20:
+            # 强图片证据 → 上调一级
+            if risk_level == "NONE":
+                risk_level = "LOW"
+                risk_factors.insert(0,
+                    f"图片证据较强（风险分{image_score}/30），生成低风险标记"
+                )
+            elif risk_level == "LOW":
+                risk_level = "MEDIUM"
+                risk_factors.insert(0,
+                    f"图片证据叠加（风险分{image_score}/30），风险等级上调至MEDIUM"
+                )
+            elif risk_level == "MEDIUM":
+                risk_level = "HIGH"
+                risk_factors.insert(0,
+                    f"图片证据强烈（风险分{image_score}/30），风险等级上调至HIGH"
+                )
+        elif image_score >= 10:
+            # 中等图片证据 → NONE 升级为 LOW
+            if risk_level == "NONE":
+                risk_level = "LOW"
+                risk_factors.insert(0,
+                    f"存在图片雷同线索（风险分{image_score}/30）"
+                )
+
         result.risk_score = score
         result.risk_level = risk_level
         result.risk_factors = risk_factors

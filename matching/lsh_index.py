@@ -85,13 +85,13 @@ class DocLevelLSHIndex:
         """查询所有特征中的相似文档对"""
         # 先插入所有文档
         for f in features:
-            if f.doc_minhash and not f.is_scanned:
+            if f.doc_minhash:
                 self.insert(f.doc_id, f.doc_minhash)
 
         # 查询每对
         pairs = set()
         for f in features:
-            if f.is_scanned or not f.doc_minhash:
+            if not f.doc_minhash:
                 continue
             matches = self.query(f.doc_id, f.doc_minhash)
             for match_id in matches:

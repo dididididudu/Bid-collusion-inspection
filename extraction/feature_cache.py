@@ -14,8 +14,7 @@ import json
 import sqlite3
 import logging
 import numpy as np
-from typing import List, Dict, Optional, Tuple, Generator, Any
-from datetime import datetime
+from typing import List, Dict, Optional, Tuple
 from contextlib import contextmanager
 
 from data_structures import (
@@ -49,6 +48,9 @@ class DocumentCache:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
         self.conn.execute("PRAGMA temp_store=MEMORY")
+        # 写锁等待超时，避免并发写入时立即 SQLITE_BUSY
+        _busy_ms = getattr(config, 'DB_BUSY_TIMEOUT', 30000)
+        self.conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
 
         self._create_schema()
         logger.info(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
@@ -63,6 +65,8 @@ class DocumentCache:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-16000")  # 16MB per thread
         conn.execute("PRAGMA temp_store=MEMORY")
+        _busy_ms = getattr(self.config, 'DB_BUSY_TIMEOUT', 30000)
+        conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
         return conn
 
     @contextmanager
@@ -355,7 +359,7 @@ class DocumentCache:
     def load_all_documents(self) -> List[BidFeature]:
         """加载所有已处理文档的特征（轻量级，不含文本内容）"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM documents WHERE is_scanned = 0")
+        cursor.execute("SELECT * FROM documents")
         docs = []
         for row in cursor.fetchall():
             docs.append(self._row_to_bid_feature(row))
