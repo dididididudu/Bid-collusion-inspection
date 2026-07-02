@@ -48,9 +48,31 @@ echo -e "  ${GREEN}Python: $($PYTHON --version)${NC}"
 
 PIP="$PYTHON -m pip"
 if ! $PYTHON -m pip --version &> /dev/null; then
-    echo -e "${RED}错误: pip 未安装${NC}"
-    exit 1
+    echo "  pip 未安装，尝试自动安装..."
+    # 方法1: ensurepip 引导
+    if $PYTHON -m ensurepip --upgrade 2>/dev/null; then
+        echo "  pip 安装成功 (ensurepip)"
+    # 方法2: 系统包管理器
+    elif command -v apt &> /dev/null; then
+        echo "  尝试 apt install python3-pip..."
+        sudo apt update -qq && sudo apt install -y -qq python3-pip 2>&1 | tail -1
+    elif command -v yum &> /dev/null; then
+        echo "  尝试 yum install python3-pip..."
+        sudo yum install -y python3-pip 2>&1 | tail -1
+    # 方法3: get-pip.py
+    else
+        echo "  尝试 get-pip.py..."
+        curl -sS https://bootstrap.pypa.io/get-pip.py | $PYTHON 2>&1 | tail -1
+    fi
+    # 再次验证
+    if ! $PYTHON -m pip --version &> /dev/null; then
+        echo -e "${RED}错误: pip 安装失败，请手动安装${NC}"
+        echo "  Ubuntu: sudo apt install python3-pip"
+        echo "  通用:  curl https://bootstrap.pypa.io/get-pip.py | sudo python3"
+        exit 1
+    fi
 fi
+echo -e "  ${GREEN}pip: $($PYTHON -m pip --version | head -1)${NC}"
 
 # ---------- 2. 安装依赖 ----------
 echo ""
