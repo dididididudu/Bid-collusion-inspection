@@ -35,7 +35,7 @@ from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.checkpoint import CheckpointManager
 from pipeline.streaming_context import StreamingContext
 from embedding.embedding_engine import EmbeddingEngine
-from image_analysis.image_ocr import ImageOCREngine
+from image_analysis.image_ocr import ImageOCREngine, OCRResult
 from image_analysis.image_matcher import ImageMatcher
 from scoring import RiskScoringEngine
 from report import ReportGenerator
