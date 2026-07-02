@@ -172,12 +172,13 @@ HF_MIRROR=https://hf-mirror.com \
 ```
 
 安装脚本会自动完成：
-1. ✅ 环境检测（Python、CUDA、GPU 型号/显存）
+1. ✅ 环境检测（Python、CUDA 版本、GPU 型号/显存）
 2. ✅ 安装系统依赖（libGL、libgomp 等）
 3. ✅ 安装 Python 核心依赖（PyMuPDF、jieba、sentence-transformers 等）
-4. ✅ 安装 OCR 引擎（优先 PaddleOCR GPU，失败自动降级 EasyOCR）
-5. ✅ 预下载 SBERT 语义匹配模型（~400MB）
-6. ✅ 验证所有模块安装成功
+4. ✅ 安装 PaddlePaddle GPU（自动匹配 CUDA 12.1，PP-OCRv6 使用完整检测+识别 pipeline）
+5. ✅ 安装 PaddleOCR（高性能中文文字识别引擎）
+6. ✅ 预下载 SBERT 语义匹配模型（~400MB，使用 CUDA GPU 缓存）
+7. ✅ 验证所有模块安装成功，包括 PaddleOCR 初始化测试
 
 ### 运行检测
 

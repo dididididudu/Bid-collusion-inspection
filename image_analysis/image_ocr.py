@@ -341,9 +341,28 @@ class ImageOCREngine:
             # 构建通用参数
             common_kwargs = {}
             if self._model_dir:
-                common_kwargs['det_model_dir'] = self._model_dir
-                common_kwargs['rec_model_dir'] = self._model_dir
-                logger.info(f"使用自定义模型目录: {self._model_dir}")
+                # 检测子目录结构：PaddleOCR 模型通常放在 det/、rec/ 子目录下
+                # 如果用户只指定了父目录，自动补全子目录路径
+                det_dir = os.path.join(self._model_dir, 'det')
+                rec_dir = os.path.join(self._model_dir, 'rec')
+                if os.path.exists(det_dir) and os.path.exists(rec_dir):
+                    common_kwargs['det_model_dir'] = det_dir
+                    common_kwargs['rec_model_dir'] = rec_dir
+                    logger.info(f"使用自定义模型目录 (子目录): det={det_dir}, rec={rec_dir}")
+                elif os.path.isdir(self._model_dir) and any(
+                    f.endswith('.pdiparams') or f.endswith('.pdmodel')
+                    for f in os.listdir(self._model_dir)
+                ):
+                    # 如果目录直接包含模型文件，直接使用
+                    common_kwargs['det_model_dir'] = self._model_dir
+                    common_kwargs['rec_model_dir'] = self._model_dir
+                    logger.info(f"使用自定义模型目录: {self._model_dir}")
+                else:
+                    # 目录不存在或结构不明确，让 PaddleOCR 使用内置模型
+                    logger.info(
+                        f"OCR_MODEL_DIR={self._model_dir} 未检测到标准模型子目录，"
+                        f"将使用 PaddleOCR 内置模型（首次运行自动下载）"
+                    )
 
             if paddle_major < 3:
                 # === PaddleOCR 2.x ===
