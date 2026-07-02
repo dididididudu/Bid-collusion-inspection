@@ -5,7 +5,8 @@ BatchBidCollusionDetector - 投标文件串标围标检测系统
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 os.environ['HF_HOME'] = './models'
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
+# 注意: 不在此处设置 TRANSFORMERS_OFFLINE=1
+# 首次运行时需要在线下载/验证模型，仅在 --offline 模式下启用离线限制
 
 import sys
 import argparse

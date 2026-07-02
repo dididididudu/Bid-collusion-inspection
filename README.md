@@ -144,6 +144,100 @@ python main.py --input ./bids/ --output ./report/ --streaming --config config.js
 | GPU 加速 | `--gpu` 或设置 `SBERT_DEVICE: "cuda"` |
 | 超大文件 | 增大 `CHUNK_PAGE_SIZE` (100)，减少 `MAX_CHUNKS_IN_MEMORY` (3) |
 
+## Notebook 环境部署（云端 GPU）
+
+本系统已适配云端 Notebook 环境（如阿里云、腾讯云、AutoDL 等 GPU 容器）。
+
+### 适用环境
+
+| 项目 | 说明 |
+|------|------|
+| 预装镜像 | `ubuntu22.04-cuda12.1.0-py311-torch2.3.1-tf2.16.1` |
+| Python | 3.11 ✅ |
+| PyTorch | 2.3.1 + CUDA 12.1 ✅（已预装） |
+| TensorFlow | 2.16.1 ✅（项目未使用但不冲突） |
+
+### 一键安装
+
+在 Notebook 终端中执行：
+
+```bash
+# 1. 给脚本添加执行权限
+chmod +x install_notebook.sh
+
+# 2. 一键安装（国内镜像加速）
+PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple \
+HF_MIRROR=https://hf-mirror.com \
+./install_notebook.sh
+```
+
+安装脚本会自动完成：
+1. ✅ 环境检测（Python、CUDA、GPU 型号/显存）
+2. ✅ 安装系统依赖（libGL、libgomp 等）
+3. ✅ 安装 Python 核心依赖（PyMuPDF、jieba、sentence-transformers 等）
+4. ✅ 安装 OCR 引擎（优先 PaddleOCR GPU，失败自动降级 EasyOCR）
+5. ✅ 预下载 SBERT 语义匹配模型（~400MB）
+6. ✅ 验证所有模块安装成功
+
+### 运行检测
+
+```bash
+# GPU 加速模式（推荐）
+python main.py --input ./bids/ --output ./report/ --gpu --config config.notebook.json
+
+# CPU 模式
+python main.py --input ./bids/ --output ./report/
+
+# 仅运行环境诊断
+python main.py --diagnose --gpu --config config.notebook.json
+```
+
+### 配置文件说明
+
+`config.notebook.json` 是专为 Notebook 环境优化的 GPU 配置：
+
+| 配置项 | 推荐值 | 说明 |
+|--------|--------|------|
+| `USE_GPU` | `true` | 启用 GPU 加速 |
+| `SBERT_DEVICE` | `"cuda"` | SBERT 使用 CUDA 推理 |
+| `SBERT_BATCH_SIZE` | `256` | 利用 GPU 大显存批量编码 |
+| `MAX_MEMORY_MB` | `8192` | 大文档集内存上限 |
+| `MAX_WORKERS` | `8` | 并行 worker 数 |
+| `OCR_ENGINE` | `"paddleocr"` | 自动检测，失败降级 `"easyocr"` |
+
+### Notebook 内直接使用（Python API）
+
+```python
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+from config import load_config
+from pipeline.orchestrator import BidDetectionOrchestrator
+
+# 加载 GPU 配置
+config = load_config('config.notebook.json')
+
+# 创建检测引擎
+detector = BidDetectionOrchestrator(config)
+
+# 执行检测
+report = detector.detect('./bids/', './output/')
+
+# 查看结果
+print(f"可疑对: {report.suspicious_pairs}")
+print(f"高风险: {report.high_risk_pairs}")
+
+# 获取详细结果
+for pair in report.top_pairs:
+    print(f"  {pair.doc_a} ↔ {pair.doc_b}: 风险分数 {pair.risk_score}")
+```
+
+### 注意
+
+- **首次运行**会自动下载模型（~400MB），`install_notebook.sh` 已提前下载
+- **离线环境**：需要提前下载模型，参考 `deploy/download_models.sh`
+- **OCR 优化**：如 PaddlePaddle 安装失败，脚本会自动降级到 EasyOCR
+
 ## 系统要求
 
 - Python 3.7+
