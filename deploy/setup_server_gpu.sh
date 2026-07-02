@@ -37,19 +37,28 @@ echo "[2/6] 安装 GPU 依赖..."
 
 PIP_MIRROR="${PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 
-# 先安装 PyTorch (CUDA 12.1)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
-    2>&1 | tail -2
+# PyTorch: 已有CUDA版本则跳过
+if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    TORCH_VER=$(python3 -c "import torch; print(torch.__version__)")
+    echo "  PyTorch 已安装 ($TORCH_VER + CUDA), 跳过"
+else
+    echo "  安装 PyTorch (CUDA 12.1)..."
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 2>&1 | tail -2
+fi
 
-# 安装 PaddlePaddle GPU
-pip install paddlepaddle-gpu==3.0.0.post120 \
-    -f https://www.paddlepaddle.org.cn/whl/linux/cuda12.1/stable.html \
-    2>&1 | tail -2
+# PaddlePaddle GPU: 已有则跳过
+if python3 -c "import paddle; assert paddle.is_compiled_with_cuda()" 2>/dev/null; then
+    PADDLE_VER=$(python3 -c "import paddle; print(paddle.__version__)")
+    echo "  PaddlePaddle 已安装 ($PADDLE_VER + CUDA), 跳过"
+else
+    echo "  安装 PaddlePaddle GPU (CUDA 12.1)..."
+    pip install paddlepaddle-gpu==3.0.0.post120 \
+        -f https://www.paddlepaddle.org.cn/whl/linux/cuda12.1/stable.html 2>&1 | tail -2
+fi
 
-# 安装其余依赖
+# 其余依赖 (torch/paddle已存在则自动跳过)
 pip install -r deploy/requirements.gpu.txt -i "$PIP_MIRROR" \
-    --default-timeout=120 --retries 5 \
-    2>&1 | tail -3
+    --default-timeout=120 --retries 5 2>&1 | tail -3
 
 echo "  依赖安装完成"
 
