@@ -231,6 +231,15 @@ class ImageMatcher:
                 f"⚠ PS嫌疑: {result.ps_suspicious_count} 对图片文字相同但图片特征不同"
             )
 
+    # 常见中文 OCR 易混淆字符对（形近字）
+    _OCR_CONFUSION_PAIRS = {
+        ('日', '曰'), ('己', '已'), ('末', '未'), ('土', '士'),
+        ('干', '千'), ('人', '入'), ('天', '夭'), ('王', '玉'),
+        ('戍', '戌'), ('概', '慨'), ('拨', '拔'), ('析', '折'),
+        ('准', '淮'), ('贷', '货'), ('辨', '辩'), ('概', '慨'),
+        ('燥', '躁'), ('侯', '候'), ('拦', '栏'), ('历', '厉'),
+    }
+
     def _detect_shared_typos(
         self,
         words_a: List[str],
@@ -239,40 +248,92 @@ class ImageMatcher:
     ):
         """L3: 相同错别字检测
 
-        在两个文档的 OCR 词中找共同的低频/异常词。
-        相同错别字不会偶然出现在两个独立文档中。
+        核心思路：OCR 错误产生的"假词"（非合法中文词）不会偶然出现在
+        两个独立文档中。如果两份文档的 OCR 结果包含相同的非合法词，
+        说明它们来自同一源图片（或同一 OCR 引擎的错误模式）。
+
+        检测逻辑:
+        1. 找出两文档中的"非合法词"（不在词库中的词）
+        2. 两文档共有的非合法词 = 相同 OCR 错字 → 高嫌疑
+        3. 同时检测 OCR 易混淆字符对产生的错字
         """
         if not words_a or not words_b:
             return
 
-        # 统计词频（低频 = 可能错字）
-        from collections import Counter
-        freq_a = Counter(words_a)
-        freq_b = Counter(words_b)
+        # 加载常用中文词库（jieba 内置词典 + 扩展）
+        common_words = self._get_common_word_set()
 
-        # 找各文档的低频词（出现 ≤ 2 次）
-        rare_a = {w for w, c in freq_a.items()
-                  if c <= 2 and len(w) >= self.TYPO_MIN_LENGTH}
-        rare_b = {w for w, c in freq_b.items()
-                  if c <= 2 and len(w) >= self.TYPO_MIN_LENGTH}
+        # 找出各文档的非合法词（可能是 OCR 错误产生的）
+        invalid_a = {w for w in words_a
+                     if len(w) >= self.TYPO_MIN_LENGTH
+                     and w not in common_words
+                     and not w.isascii()}  # 排除纯英文
+        invalid_b = {w for w in words_b
+                     if len(w) >= self.TYPO_MIN_LENGTH
+                     and w not in common_words
+                     and not w.isascii()}
 
-        # 共同低频词 = 嫌疑错别字
-        shared = rare_a & rare_b
+        # 共同非合法词 = 相同错别字（强证据）
+        shared_invalid = invalid_a & invalid_b
 
-        # 过滤常见词（用简单规则：全英文跳过，纯数字跳过）
-        filtered = {
-            w for w in shared
-            if not w.isascii() or not w.isalpha()
-        }
+        # 额外检测：OCR 易混淆字符产生的错字
+        # 如果两文档各有一个词，仅差一个易混淆字符，也视为相同错字
+        confusion_typos = set()
+        for wa in invalid_a:
+            for wb in invalid_b:
+                if len(wa) == len(wb) and wa != wb:
+                    # 检查是否为单字符替换
+                    diffs = [(i, wa[i], wb[i]) for i in range(len(wa)) if wa[i] != wb[i]]
+                    if len(diffs) == 1:
+                        i, ca, cb = diffs[0]
+                        if (ca, cb) in self._OCR_CONFUSION_PAIRS or \
+                           (cb, ca) in self._OCR_CONFUSION_PAIRS:
+                            confusion_typos.add(f"{wa}↔{wb}")
 
-        result.shared_typos = list(filtered)[:20]  # 最多20个
-        result.shared_typo_count = len(filtered)
+        # 合并结果
+        all_typos = sorted(shared_invalid)[:15]
+        if confusion_typos:
+            all_typos.extend(sorted(confusion_typos)[:5])
+
+        result.shared_typos = all_typos
+        result.shared_typo_count = len(shared_invalid) + len(confusion_typos)
 
         if result.shared_typo_count >= self.TYPO_MIN_COUNT:
+            detail = ', '.join(all_typos[:5])
+            if len(all_typos) > 5:
+                detail += '...'
             result.image_risk_factors.append(
-                f"⚠ 相同错别字: {result.shared_typo_count} 个 "
-                f"({', '.join(result.shared_typos[:5])}...)"
+                f"⚠ 相同错别字: {result.shared_typo_count} 个 ({detail})"
             )
+
+    @staticmethod
+    def _get_common_word_set() -> set:
+        """获取常用中文词集合（缓存）"""
+        if not hasattr(ImageMatcher, '_COMMON_WORDS_CACHE'):
+            import jieba
+            # jieba 内置词典中的词都是合法中文词
+            common = set()
+            try:
+                # 读取 jieba 词典
+                dict_path = jieba.get_dict_file()
+                with open(dict_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if parts:
+                            word = parts[0]
+                            if len(word) >= 2:
+                                common.add(word)
+            except Exception:
+                pass
+            # 常见技术术语补充
+            common.update({
+                '运维', '管控', '模型', '训练', '系统', '平台', '数据',
+                '算法', '架构', '部署', '监控', '预警', '检测', '分析',
+                '接口', '模块', '配置', '参数', '日志', '缓存', '队列',
+                '集群', '容器', '编排', '调度', '负载', '均衡', '代理',
+            })
+            ImageMatcher._COMMON_WORDS_CACHE = frozenset(common)
+        return ImageMatcher._COMMON_WORDS_CACHE
 
     # ================================================================
     # 文本相似度（复用 jieba Jaccard，不依赖 SBERT）
