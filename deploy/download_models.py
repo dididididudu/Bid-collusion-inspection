@@ -73,8 +73,21 @@ def download_sbert_models(output_dir: str):
     os.makedirs(os.environ["HF_HOME"], exist_ok=True)
 
     model_name = "paraphrase-multilingual-MiniLM-L12-v2"
-    logger.info(f"下载 SBERT 模型 ({model_name}, ~120MB)...")
+    model_id = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    logger.info(f"下载 SBERT 模型 ({model_name}, ~470MB)...")
+    logger.info("  (大文件下载中，请耐心等待，约需2-5分钟)")
+
     try:
+        # 强制显示下载进度条
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=model_id,
+            cache_dir=os.environ["HF_HOME"],
+            resume_download=True,
+            tqdm_class=None,  # 使用默认 tqdm
+        )
+
+        # 验证下载成功
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer(model_name, device="cpu")
         logger.info(f"SBERT 模型就绪 (维度: {model.get_sentence_embedding_dimension()})")
@@ -84,6 +97,7 @@ def download_sbert_models(output_dir: str):
         return False
     except Exception as e:
         logger.warning(f"SBERT 模型下载失败: {e}")
+        logger.warning("如果网络不通，可手动下载后放到 models/sbert/ 目录")
         return False
 
 
