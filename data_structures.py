@@ -188,6 +188,22 @@ class ImageEvidence:
     # 匹配图片路径（供 HTML 报告嵌入展示，JSON 中仅存储路径）
     matched_image_paths: Dict = field(default_factory=dict)
 
+    # === 逐对详情（供报告全量展示） ===
+    # L1: 每对匹配图片的完整信息
+    matched_image_pairs: List[Dict] = field(default_factory=list)
+    # [{source_a, source_b, phash_dist, dhash_dist, orb_match_ratio,
+    #   histogram_correlation, confidence, reasons, thumbnail_base64_a,
+    #   thumbnail_base64_b, ocr_text_a, ocr_text_b}, ...]
+
+    # L2: 每对文字匹配详情
+    matched_text_pairs: List[Dict] = field(default_factory=list)
+    # [{text_a, text_b, similarity, method}, ...]
+
+    # L4: 每对 PS 嫌疑详情
+    ps_detail_list: List[Dict] = field(default_factory=list)
+    # [{text_a, text_b, text_sim, non_text_dist, dimension_match,
+    #   len_similar, evidence_count}, ...]
+
     # 综合
     image_risk_score: int = 0            # 图片维度风险分 (0-30)
     image_risk_factors: List[str] = field(default_factory=list)

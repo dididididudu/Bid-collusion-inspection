@@ -122,6 +122,21 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         logger.info(f"配置加载完成: MAX_WORKERS={config.MAX_WORKERS}, CHECKPOINT_INTERVAL={config.CHECKPOINT_INTERVAL}")
 
+        # 预加载 SBERT 模型（避免 Phase 1.5/3 中重复加载）
+        logger.info("预加载 SBERT 模型...")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _sbert_model = SentenceTransformer(
+                'paraphrase-multilingual-MiniLM-L12-v2',
+                device=config.SBERT_DEVICE if config.SBERT_DEVICE != "auto" else "cpu",
+                cache_folder='./models',
+                trust_remote_code=True,
+                local_files_only=False,
+            )
+            logger.info(f"SBERT 模型预加载完成 (设备: {_sbert_model.device})")
+        except Exception as e:
+            logger.warning(f"SBERT 模型预加载失败（后续将按需加载）: {e}")
+
         # 自动清除旧缓存文件（每次启动干净运行）
         if config.DISABLE_CACHE:
             import glob as _glob

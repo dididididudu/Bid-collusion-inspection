@@ -7,7 +7,7 @@ OCR 辅助函数 — 供 orchestrator 和 parallel_workers 共用
 import os
 import io
 import logging
-from typing import List
+from typing import List, Dict
 
 import numpy as np
 from PIL import Image
@@ -20,6 +20,69 @@ logger = logging.getLogger(__name__)
 
 # OCR 聚合段落的虚拟块索引
 OCR_CHUNK_INDEX: int = 1000000
+
+
+def _compute_non_text_hash(img_array: np.ndarray, bboxes: List[Dict]) -> str:
+    """计算去除文字区域后的图片哈希
+
+    用 OCR bbox 坐标将文字区域涂白，再计算 pHash。
+    用于 PS 嫌疑检测：如果两张图文字不同但 non_text_hash 相同，
+    说明背景/结构未变，只有文字被修改过。
+
+    Args:
+        img_array: 原始图片 (H, W, 3) numpy 数组
+        bboxes: OCR bbox 列表 [{x, y, w, h}, ...]
+
+    Returns:
+        去除文字后的 pHash 字符串
+    """
+    if not bboxes or img_array.size == 0:
+        return ''
+
+    masked = img_array.copy()
+    h_img, w_img = masked.shape[:2]
+
+    for bbox in bboxes:
+        x = max(0, int(bbox.get('x', 0)))
+        y = max(0, int(bbox.get('y', 0)))
+        w = min(int(bbox.get('w', 0)), w_img - x)
+        h = min(int(bbox.get('h', 0)), h_img - y)
+        if w > 0 and h > 0:
+            # 用区域周边的平均色填充（取四边采样）
+            edge_pixels = []
+            sample_count = min(10, max(1, (w + h) // 10))
+            for s in range(sample_count):
+                sx = x + (w * s) // sample_count
+                # 上边缘
+                if y > 0:
+                    edge_pixels.append(masked[y - 1, sx])
+                # 下边缘
+                if y + h < h_img - 1:
+                    edge_pixels.append(masked[y + h, sx])
+            bg_color = np.median(edge_pixels, axis=0).astype(np.uint8) if edge_pixels else np.array([255, 255, 255], dtype=np.uint8)
+            masked[y:y + h, x:x + w] = bg_color
+
+    return str(imagehash.phash(Image.fromarray(masked)))
+
+
+def _make_thumbnail(img_array: np.ndarray, size: int = 64) -> bytes:
+    """生成图片的缩略图（JPEG 格式），供 ORB 特征匹配和直方图比较使用
+
+    Args:
+        img_array: numpy 数组 (H, W, 3)
+        size: 缩略图边长（保持宽高比）
+
+    Returns:
+        JPEG 字节流
+    """
+    if img_array.size == 0:
+        return b''
+    img = Image.fromarray(img_array)
+    img.thumbnail((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    # JPEG 质量 85 折中体积和质量
+    img.save(buf, format='JPEG', quality=85)
+    return buf.getvalue()
 
 
 def ocr_pages(
@@ -89,6 +152,12 @@ def ocr_pages(
 
                     ocr_result = ocr_engine.extract(img_array)
                     ocr_result.image_hash = phash
+                    ocr_result.image_width = img.width
+                    ocr_result.image_height = img.height
+                    ocr_result.thumbnail = _make_thumbnail(img_array)
+                    ocr_result.non_text_hash = _compute_non_text_hash(
+                        img_array, ocr_result.bboxes
+                    )
 
                     if ocr_result.confidence >= min_conf and ocr_result.text.strip():
                         cache.store_image_ocr_result(
@@ -96,6 +165,10 @@ def ocr_pages(
                             image_hash=phash, ocr_text=ocr_result.text,
                             ocr_words=ocr_result.words, bboxes=ocr_result.bboxes,
                             confidence=ocr_result.confidence,
+                            non_text_hash=ocr_result.non_text_hash,
+                            image_width=ocr_result.image_width,
+                            image_height=ocr_result.image_height,
+                            thumbnail=ocr_result.thumbnail,
                         )
                         ocr_count += 1
                 else:
@@ -133,6 +206,12 @@ def ocr_pages(
 
                             ocr_result = ocr_engine.extract(img_array)
                             ocr_result.image_hash = phash
+                            ocr_result.image_width = crop.width
+                            ocr_result.image_height = crop.height
+                            ocr_result.thumbnail = _make_thumbnail(img_array)
+                            ocr_result.non_text_hash = _compute_non_text_hash(
+                                img_array, ocr_result.bboxes
+                            )
 
                             if ocr_result.confidence < min_conf:
                                 continue
@@ -144,6 +223,10 @@ def ocr_pages(
                                 image_hash=phash, ocr_text=ocr_result.text,
                                 ocr_words=ocr_result.words, bboxes=ocr_result.bboxes,
                                 confidence=ocr_result.confidence,
+                                non_text_hash=ocr_result.non_text_hash,
+                                image_width=ocr_result.image_width,
+                                image_height=ocr_result.image_height,
+                                thumbnail=ocr_result.thumbnail,
                             )
                             ocr_count += 1
 

@@ -92,8 +92,8 @@ class DetectionConfig:
     EMBED_WORKERS: int = 2  # Phase 1.5 编码工作进程数
 
     # 并行处理
-    PHASE1_WORKERS: int = 4       # Phase 1 提取并行度 (ProcessPoolExecutor)
-    PHASE3_WORKERS: int = 4       # Phase 3 分析并行度 (ThreadPoolExecutor)
+    PHASE1_WORKERS: int = 8       # Phase 1 提取并行度 (ProcessPoolExecutor)
+    PHASE3_WORKERS: int = 8       # Phase 3 分析并行度 (ThreadPoolExecutor)
     DB_BUSY_TIMEOUT: int = 30000  # SQLite 写锁等待超时 (ms)
 
     # 文档级向量预筛
@@ -122,7 +122,7 @@ class DetectionConfig:
 
     METADATA_FILTER_ENABLED: bool = True  # 元数据指纹候选筛选
 
-    DISABLE_CACHE: bool = True
+    DISABLE_CACHE: bool = False
 
     def __post_init__(self):
         if self.CHUNK_PAGE_SIZE < 10:

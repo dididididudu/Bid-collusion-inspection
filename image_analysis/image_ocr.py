@@ -32,7 +32,11 @@ class OCRResult:
     words: List[str] = field(default_factory=list)   # 识别到的词列表
     bboxes: List[Dict] = field(default_factory=list) # [{text, x, y, w, h}, ...]
     confidence: float = 0.0                 # 平均置信度
-    image_hash: str = ""                    # 页面图片哈希 (pHash)，供 L2 PS 检测使用
+    image_hash: str = ""                    # 页面图片哈希 (pHash)，供 PS 检测使用
+    non_text_hash: str = ""                 # 去除文字区域后的图片哈希（涂掉文字再 hash）
+    image_width: int = 0                    # 原始图片宽度（像素）
+    image_height: int = 0                   # 原始图片高度（像素）
+    thumbnail: bytes = b""                  # 64×64 JPEG 缩略图（供 ORB 匹配+直方图比较）
 
 
 class ImageOCREngine:
