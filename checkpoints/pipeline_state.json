@@ -1,0 +1,17 @@
+{
+  "phase": 6,
+  "completed_pairs": 1,
+  "total_pairs": 1,
+  "processed_files": [
+    "./input\\测试6.pdf",
+    "./input\\测试7.pdf"
+  ],
+  "completed_pair_ids": [
+    "697b16a04330ed19::c9e5b739ca870301"
+  ],
+  "start_time": "2026-07-02T16:37:37.152456",
+  "config_hash": "21cde3b57080",
+  "input_hash": "131f14776f5b7c64a08591bce5792ff5",
+  "version": 2,
+  "updated_at": "2026-07-02T16:38:54.324246"
+}
