@@ -70,6 +70,9 @@ class BidDetectionOrchestrator:
         self.scoring_engine = RiskScoringEngine(config)
         self.report_generator = ReportGenerator(config)
 
+        # SBERT 嵌入引擎（跨阶段复用：Phase 1.5 编码 + Phase 3 匹配）
+        self.embedding_engine = EmbeddingEngine(config)
+
         # 图片分析引擎（OCR + 四层检测）
         self.ocr_engine = ImageOCREngine(
             use_gpu=config.USE_GPU,
@@ -260,6 +263,16 @@ class BidDetectionOrchestrator:
             if state.phase < 3:
                 self._phase_embed(state)
 
+            # Phase 1.5 完成后，将已加载的 SBERT 模型注入 Phase 3 的匹配器
+            if (self.embedding_engine.is_available
+                    and self.embedding_engine.model is not None
+                    and self.paragraph_matcher is not None):
+                self.paragraph_matcher._ensure_semantic_matcher()
+                self.paragraph_matcher.semantic_matcher.set_model(
+                    self.embedding_engine.model
+                )
+                logger.debug("Phase 1.5 SBERT 模型已注入 Phase 3 ParagraphMatcher")
+
             # === Phase 2: SELECT ===
             if state.phase < 4:
                 logger.info("Phase 2: 候选对选择...")
@@ -351,12 +364,17 @@ class BidDetectionOrchestrator:
                         config_dict = self._get_picklable_config()
                         db_dir = self.config.CACHE_DIR
 
+                        # 预先加载 SBERT 模型一次，所有线程共享
+                        self.paragraph_matcher._ensure_semantic_matcher()
+                        shared_matcher = self.paragraph_matcher.semantic_matcher
+
                         with ThreadPoolExecutor(max_workers=num_workers) as executor:
                             future_to_pair = {}
                             for doc_a_id, doc_b_id in pending_pairs:
                                 future = executor.submit(
                                     analyze_pair_worker,
-                                    (doc_a_id, doc_b_id, config_dict, db_dir)
+                                    (doc_a_id, doc_b_id, config_dict, db_dir,
+                                     shared_matcher)
                                 )
                                 future_to_pair[future] = (doc_a_id, doc_b_id)
 
@@ -1004,7 +1022,7 @@ class BidDetectionOrchestrator:
         logger.info("Phase 1.5: 全局 SBERT 嵌入编码...")
         embed_start = datetime.now()
 
-        engine = EmbeddingEngine(self.config)
+        engine = self.embedding_engine
         if not engine.is_available:
             logger.warning("SBERT 不可用，跳过 Phase 1.5 嵌入编码")
             state.phase = 3
@@ -1030,74 +1048,35 @@ class BidDetectionOrchestrator:
         if not embed_doc_ids:
             logger.info("Phase 1.5: 没有需要编码的文档")
         else:
-            num_embed_workers = min(
-                self.config.EMBED_WORKERS,
-                len(embed_doc_ids),
-                os.cpu_count() or 4,
+            # 统一使用主进程编码，避免每个 worker 重复加载 SBERT 模型（~480MB/次）
+            # 对 GPU 场景，单进程编码可充分利用 CUDA 批量推理，无 GIL 问题；
+            # 对 CPU 场景，PyTorch 矩阵运算自动释放 GIL，串行与并行速度接近。
+            logger.info(
+                f"Phase 1.5 单进程模式: 编码 {len(embed_doc_ids)} 个文档, "
+                f"模型已加载 (设备: {engine.device})"
             )
-
-            if num_embed_workers <= 1:
-                # === 串行路径 ===
-                for doc_feat in features:
-                    if not doc_feat.doc_minhash:
-                        continue
-                    try:
-                        paragraphs = self.cache.load_all_paragraphs_text(
-                            doc_feat.doc_id
+            for doc_feat in features:
+                if not doc_feat.doc_minhash:
+                    continue
+                try:
+                    paragraphs = self.cache.load_all_paragraphs_text(
+                        doc_feat.doc_id
+                    )
+                    if paragraphs:
+                        count = engine.encode_document(
+                            doc_feat.doc_id, paragraphs, self.cache
                         )
-                        if paragraphs:
-                            count = engine.encode_document(
-                                doc_feat.doc_id, paragraphs, self.cache
-                            )
-                            total_paragraphs += count
-                        else:
-                            logger.debug(
-                                f"Phase 1.5: {doc_feat.filename} 无段落文本，跳过"
-                            )
-                    except Exception as e:
-                        logger.error(
-                            f"嵌入编码失败 ({doc_feat.filename}): {e}",
-                            exc_info=True,
+                        total_paragraphs += count
+                    else:
+                        logger.debug(
+                            f"Phase 1.5: {doc_feat.filename} 无段落文本，跳过"
                         )
-                        continue
-            else:
-                # === 并行路径 (ProcessPoolExecutor) ===
-                logger.info(
-                    f"Phase 1.5 并行模式: {num_embed_workers} workers, "
-                    f"{len(embed_doc_ids)} 个文档"
-                )
-                from pipeline.parallel_workers import embed_single_worker
-
-                config_dict = self._get_picklable_config()
-                db_dir = self.config.CACHE_DIR
-
-                with ProcessPoolExecutor(max_workers=num_embed_workers) as executor:
-                    future_to_doc = {
-                        executor.submit(
-                            embed_single_worker,
-                            (doc_id, config_dict, db_dir)
-                        ): doc_id
-                        for doc_id in embed_doc_ids
-                    }
-
-                    for future in as_completed(future_to_doc):
-                        doc_id = future_to_doc[future]
-                        try:
-                            result = future.result()
-                            if result['success']:
-                                total_paragraphs += result.get(
-                                    'paragraphs_encoded', 0
-                                )
-                            else:
-                                logger.error(
-                                    f"嵌入编码失败 ({doc_id}): "
-                                    f"{result.get('error', 'unknown')}"
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"Embed worker 异常 ({doc_id}): {e}",
-                                exc_info=True,
-                            )
+                except Exception as e:
+                    logger.error(
+                        f"嵌入编码失败 ({doc_feat.filename}): {e}",
+                        exc_info=True,
+                    )
+                    continue
 
         state.phase = 3
         self.checkpoint.save(state)

@@ -15,7 +15,7 @@ from data_structures import (
     TextEvidence, MetadataEvidence, ImageEvidence,
     ChunkResult, QuoteSignature,
 )
-from image_analysis.image_ocr import ImageOCREngine
+from image_analysis.image_ocr import ImageOCREngine, OCRResult
 from image_analysis.image_matcher import ImageMatcher
 from pipeline.evidence_builder import (
     build_metadata_evidence, build_image_evidence, build_text_evidence,
@@ -200,6 +200,7 @@ def extract_single_worker(args: tuple) -> dict:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=True,
+                        ocr_workers=config.OCR_WORKERS,
                     )
                     _aggregate_ocr_paragraphs(
                         doc_id, page_count, cache, extractor, text_processor,
@@ -223,6 +224,7 @@ def extract_single_worker(args: tuple) -> dict:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=True,
+                        ocr_workers=config.OCR_WORKERS,
                     )
                     _aggregate_ocr_paragraphs(
                         doc_id, page_count, cache, extractor, text_processor,
@@ -267,6 +269,7 @@ def extract_single_worker(args: tuple) -> dict:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=False,
+                        ocr_workers=config.OCR_WORKERS,
                     )
 
         cache.conn.commit()
@@ -347,12 +350,13 @@ def analyze_pair_worker(args: tuple) -> dict:
     """Phase 3 worker: 分析一个候选文档对
 
     Args:
-        args: (doc_a_id, doc_b_id, config_dict, db_dir)
+        args: (doc_a_id, doc_b_id, config_dict, db_dir, semantic_matcher)
 
     Returns:
         {"pair_id": str, "success": bool, "match_count": int, "error": str}
     """
-    doc_a_id, doc_b_id, config_dict, db_dir = args
+    doc_a_id, doc_b_id, config_dict, db_dir = args[:4]
+    shared_matcher = args[4] if len(args) > 4 else None
     pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
 
     config = DetectionConfig(**config_dict)
@@ -374,6 +378,9 @@ def analyze_pair_worker(args: tuple) -> dict:
                     "match_count": 0, "error": "Doc not found"}
 
         matcher = ParagraphMatcher(config)
+        if shared_matcher is not None:
+            # 复用主线程已加载的 SBERT 模型，避免每个 worker 重复加载
+            matcher.semantic_matcher = shared_matcher
         scorer = RiskScoringEngine(config)
 
         # 检查文字可用性

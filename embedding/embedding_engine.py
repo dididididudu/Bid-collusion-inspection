@@ -6,6 +6,8 @@
 """
 
 import os
+# 阻止 sentence-transformers 加载 TensorFlow（旧版 TF 与新版 numpy 不兼容）
+os.environ.setdefault('USE_TF', 'FALSE')
 import logging
 from typing import List, Optional
 

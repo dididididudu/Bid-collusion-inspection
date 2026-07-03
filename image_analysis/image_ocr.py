@@ -416,10 +416,17 @@ class ImageOCREngine:
         """初始化 EasyOCR（备选引擎）"""
         try:
             import easyocr
+            # 模型存放到项目根目录下的 models/easyocr/ 中
+            # 用脚本自身路径定位根目录，避免 worker 进程 cwd 不一致
+            _script_dir = os.path.dirname(os.path.abspath(__file__))
+            _project_root = os.path.dirname(_script_dir)  # 上一级 = 项目根
+            model_dir = self._model_dir or os.path.join(_project_root, 'models', 'easyocr')
+            os.makedirs(model_dir, exist_ok=True)
             self._reader = easyocr.Reader(
                 self.languages,
                 gpu=self.use_gpu,
                 verbose=False,
+                model_storage_directory=model_dir,
             )
             self._engine_type = 'easyocr'
             self._available = True

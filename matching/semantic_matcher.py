@@ -7,6 +7,7 @@ SBERT 语义推理引擎 — 支持 GPU / ONNX 加速
 """
 
 import os
+os.environ.setdefault('USE_TF', 'FALSE')
 import logging
 from typing import List, Dict, Tuple, Optional
 
@@ -33,10 +34,16 @@ except ImportError:
 class SemanticMatcher:
     """SBERT 语义匹配引擎"""
 
-    def __init__(self, config: DetectionConfig):
+    def __init__(self, config: DetectionConfig, model=None):
         self.config = config
-        self._model = None
+        self._model = model  # 允许外部注入已加载的模型，避免重复加载
         self._device = None
+
+    def set_model(self, model):
+        """注入外部已加载的 SBERT 模型，跳过模型加载"""
+        self._model = model
+        if model is not None:
+            logger.info("SemanticMatcher: 复用外部模型实例")
 
     @property
     def is_available(self) -> bool:

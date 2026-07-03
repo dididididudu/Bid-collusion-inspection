@@ -7,7 +7,7 @@ OCR 辅助函数 — 供 orchestrator 和 parallel_workers 共用
 import os
 import io
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import numpy as np
 from PIL import Image
@@ -85,6 +85,47 @@ def _make_thumbnail(img_array: np.ndarray, size: int = 64) -> bytes:
     return buf.getvalue()
 
 
+def _ocr_crop_worker(args: tuple) -> Optional[tuple]:
+    """单个裁剪区域的 OCR 工作函数（线程安全，无共享状态写入）
+
+    Args:
+        args: (img_array, phash, image_width, image_height, min_conf,
+               ocr_engine_type, use_gpu, page_num)
+
+    Returns:
+        (page_num, OCRResult) 或 None（低于置信度或空文本）
+    """
+    img_array, phash, img_w, img_h, min_conf = args[:5]
+    ocr_engine_type = args[5] if len(args) > 5 else 'easyocr'
+    use_gpu = args[6] if len(args) > 6 else False
+    page_num = args[7] if len(args) > 7 else 0
+    if img_array.size == 0:
+        return None
+
+    # 使用线程局部的 OCR 引擎（避免多线程共享同一引擎实例的潜在问题）
+    # 首次调用时会初始化，后续复用
+    if not hasattr(_ocr_crop_worker, '_engine'):
+        from image_analysis.image_ocr import ImageOCREngine
+        _ocr_crop_worker._engine = ImageOCREngine(
+            use_gpu=use_gpu, engine=ocr_engine_type,
+        )
+    ocr = _ocr_crop_worker._engine
+
+    ocr_result = ocr.extract(img_array)
+    ocr_result.image_hash = phash
+    ocr_result.image_width = img_w
+    ocr_result.image_height = img_h
+    ocr_result.thumbnail = _make_thumbnail(img_array)
+    ocr_result.non_text_hash = _compute_non_text_hash(
+        img_array, ocr_result.bboxes
+    )
+
+    if ocr_result.confidence < min_conf or not ocr_result.text.strip():
+        return None
+
+    return (page_num, ocr_result)
+
+
 def ocr_pages(
     file_path: str,
     doc_id: str,
@@ -93,8 +134,9 @@ def ocr_pages(
     config: DetectionConfig,
     ocr_engine,
     force: bool = False,
+    ocr_workers: int = 1,
 ) -> int:
-    """对 PDF 中的图片运行 OCR 提取文字
+    """对 PDF 中的图片运行 OCR 提取文字（支持多线程并行）
 
     Args:
         file_path: PDF 文件路径
@@ -104,6 +146,7 @@ def ocr_pages(
         config: DetectionConfig
         ocr_engine: ImageOCREngine 实例
         force: True=扫描版全页OCR, False=嵌入图片OCR
+        ocr_workers: OCR 并行线程数
 
     Returns:
         成功 OCR 的图片数
@@ -124,13 +167,13 @@ def ocr_pages(
 
     logger.info(
         f"OCR: {'扫描版全页' if force else '嵌入图片'}模式 "
-        f"{os.path.basename(file_path)} ({page_count} 页)..."
+        f"{os.path.basename(file_path)} ({page_count} 页, "
+        f"workers={ocr_workers})..."
     )
 
-    ocr_count = 0
-    sample_step = config.OCR_SAMPLE_STEP
     min_conf = config.OCR_MIN_CONFIDENCE
     min_img_size = getattr(config, 'IMAGE_MIN_SIZE', 50)
+    sample_step = config.OCR_SAMPLE_STEP
 
     try:
         doc = fitz.open(file_path)
@@ -138,41 +181,26 @@ def ocr_pages(
         logger.error(f"OCR: 无法打开 PDF ({file_path}): {e}")
         return 0
 
+    # 先收集所有需要 OCR 的图片（页面渲染+裁剪，速度快）
+    crop_tasks = []
+    ocr_engine_type = getattr(config, 'OCR_ENGINE', 'easyocr')
+    use_gpu = getattr(config, 'USE_GPU', False)
     try:
         for page_num in range(0, page_count, sample_step):
             try:
                 page = doc[page_num]
 
                 if force:
-                    # 扫描版：渲染整页 → OCR
+                    # 扫描版：整页作为一张大图 OCR
                     pix = page.get_pixmap(dpi=150)
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
                     phash = str(imagehash.phash(img))
-                    img_array = np.array(img)
-
-                    ocr_result = ocr_engine.extract(img_array)
-                    ocr_result.image_hash = phash
-                    ocr_result.image_width = img.width
-                    ocr_result.image_height = img.height
-                    ocr_result.thumbnail = _make_thumbnail(img_array)
-                    ocr_result.non_text_hash = _compute_non_text_hash(
-                        img_array, ocr_result.bboxes
-                    )
-
-                    if ocr_result.confidence >= min_conf and ocr_result.text.strip():
-                        cache.store_image_ocr_result(
-                            doc_id=doc_id, page_num=page_num,
-                            image_hash=phash, ocr_text=ocr_result.text,
-                            ocr_words=ocr_result.words, bboxes=ocr_result.bboxes,
-                            confidence=ocr_result.confidence,
-                            non_text_hash=ocr_result.non_text_hash,
-                            image_width=ocr_result.image_width,
-                            image_height=ocr_result.image_height,
-                            thumbnail=ocr_result.thumbnail,
-                        )
-                        ocr_count += 1
+                    crop_tasks.append((
+                        np.array(img), phash, img.width, img.height,
+                        min_conf, ocr_engine_type, use_gpu, page_num,
+                    ))
                 else:
-                    # 文本版：渲染页面 → 裁剪图片区域 → OCR
+                    # 文本版：裁剪每个图片区域
                     image_info_list = page.get_image_info()
                     if not image_info_list:
                         continue
@@ -200,36 +228,12 @@ def ocr_pages(
                             ))
                             if crop.size[0] < 10 or crop.size[1] < 10:
                                 continue
-
                             phash = str(imagehash.phash(crop))
-                            img_array = np.array(crop)
-
-                            ocr_result = ocr_engine.extract(img_array)
-                            ocr_result.image_hash = phash
-                            ocr_result.image_width = crop.width
-                            ocr_result.image_height = crop.height
-                            ocr_result.thumbnail = _make_thumbnail(img_array)
-                            ocr_result.non_text_hash = _compute_non_text_hash(
-                                img_array, ocr_result.bboxes
-                            )
-
-                            if ocr_result.confidence < min_conf:
-                                continue
-                            if not ocr_result.text.strip():
-                                continue
-
-                            cache.store_image_ocr_result(
-                                doc_id=doc_id, page_num=page_num,
-                                image_hash=phash, ocr_text=ocr_result.text,
-                                ocr_words=ocr_result.words, bboxes=ocr_result.bboxes,
-                                confidence=ocr_result.confidence,
-                                non_text_hash=ocr_result.non_text_hash,
-                                image_width=ocr_result.image_width,
-                                image_height=ocr_result.image_height,
-                                thumbnail=ocr_result.thumbnail,
-                            )
-                            ocr_count += 1
-
+                            crop_tasks.append((
+                                np.array(crop), phash,
+                                crop.width, crop.height, min_conf,
+                                ocr_engine_type, use_gpu, page_num,
+                            ))
                         except Exception as e:
                             logger.debug(f"OCR: 第 {page_num} 页裁剪区失败: {e}")
                             continue
@@ -241,10 +245,81 @@ def ocr_pages(
     finally:
         doc.close()
 
-    if ocr_count > 0:
-        logger.info(f"OCR: {os.path.basename(file_path)} — {ocr_count} 张图片成功提取文字")
+    if not crop_tasks:
+        return 0
 
-    return ocr_count
+    logger.debug(f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别")
+
+    # 并行 OCR 识别（慢速部分）
+    ocr_results = []
+    num_workers = max(1, min(ocr_workers, len(crop_tasks), os.cpu_count() or 4))
+
+    if num_workers <= 1:
+        # 串行（按原路径走，使用传进来的 ocr_engine）
+        for task in crop_tasks:
+            img_array, phash, img_w, img_h, mc, _, _, page_n = task[:8]
+            result = ocr_engine.extract(img_array)
+            result.image_hash = phash
+            result.image_width = img_w
+            result.image_height = img_h
+            result.thumbnail = _make_thumbnail(img_array)
+            result.non_text_hash = _compute_non_text_hash(img_array, result.bboxes)
+            if result.confidence >= mc and result.text.strip():
+                ocr_results.append((result, phash, img_w, img_h, page_n))
+    else:
+        # 并行
+        logger.debug(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_map = {executor.submit(_ocr_crop_worker, task): task
+                          for task in crop_tasks}
+            for future in as_completed(future_map):
+                try:
+                    ret = future.result()
+                    if ret is not None:
+                        page_n, result = ret
+                        ocr_results.append((
+                            result, result.image_hash,
+                            result.image_width, result.image_height,
+                            page_n,
+                        ))
+                except Exception as e:
+                    logger.debug(f"OCR 线程异常: {e}")
+
+    # 批量入库（一条事务，避免逐条 commit 的开销）
+    import json as _json
+    stored = 0
+    try:
+        with cache.transaction() as conn:
+            for result, phash, img_w, img_h, page_n in ocr_results:
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO image_ocr_results "
+                        "(doc_id, page_num, image_hash, ocr_text, ocr_words_json, "
+                        "text_bboxes_json, confidence, non_text_hash, "
+                        "image_width, image_height, thumbnail) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            doc_id, page_n, phash,
+                            result.text,
+                            _json.dumps(result.words or [], ensure_ascii=False),
+                            _json.dumps(result.bboxes or [], ensure_ascii=False),
+                            result.confidence,
+                            result.non_text_hash,
+                            img_w, img_h,
+                            result.thumbnail if result.thumbnail else None,
+                        )
+                    )
+                    stored += 1
+                except Exception as e:
+                    logger.debug(f"OCR 结果入库失败: {e}")
+    except Exception as e:
+        logger.error(f"OCR 批量入库事务失败: {e}")
+
+    if stored > 0:
+        logger.info(f"OCR: {os.path.basename(file_path)} — {stored}/{len(crop_tasks)} 张图片成功提取文字")
+
+    return stored
 
 
 def aggregate_ocr_paragraphs(

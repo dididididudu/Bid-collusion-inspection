@@ -92,7 +92,7 @@ class DetectionConfig:
     EMBED_WORKERS: int = 2  # Phase 1.5 编码工作进程数
 
     # 并行处理
-    PHASE1_WORKERS: int = 8       # Phase 1 提取并行度 (ProcessPoolExecutor)
+    PHASE1_WORKERS: int = 4       # Phase 1 提取并行度 (ProcessPoolExecutor)
     PHASE3_WORKERS: int = 8       # Phase 3 分析并行度 (ThreadPoolExecutor)
     DB_BUSY_TIMEOUT: int = 30000  # SQLite 写锁等待超时 (ms)
 
@@ -105,6 +105,7 @@ class DetectionConfig:
     OCR_LANGUAGES: list = None           # None = 默认 ['ch_sim', 'en']
     OCR_SAMPLE_STEP: int = 1             # 每隔 N 页运行一次 OCR（1 = 每页）
     OCR_MIN_CONFIDENCE: float = 0.3      # OCR 最低置信度阈值
+    OCR_WORKERS: int = 4                 # 单文件内 OCR 并行线程数
 
     # OCR 部署配置
     OCR_MODEL_DIR: Optional[str] = None  # PaddleOCR 自定义模型目录（离线部署）

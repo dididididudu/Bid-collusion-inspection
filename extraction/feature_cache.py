@@ -63,7 +63,7 @@ class DocumentCache:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=-16000")  # 16MB per thread
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB per thread
         conn.execute("PRAGMA temp_store=MEMORY")
         _busy_ms = getattr(self.config, 'DB_BUSY_TIMEOUT', 30000)
         conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
