@@ -74,6 +74,23 @@ class ParagraphMatcher:
         if not stage1_candidates:
             return []
 
+        # 过滤跨类型候选对（OCR 段落只和 OCR 段落匹配，文本只和文本匹配）
+        source_a = cache.get_paragraph_source_map(doc_a.doc_id)
+        source_b = cache.get_paragraph_source_map(doc_b.doc_id)
+        before = len(stage1_candidates)
+        stage1_candidates = [
+            (i, j, sim) for i, j, sim in stage1_candidates
+            if source_a.get(i, 'text') == source_b.get(j, 'text')
+        ]
+        if before - len(stage1_candidates) > 0:
+            logger.debug(
+                f"跨类型过滤: 去除 {before - len(stage1_candidates)} 对 "
+                f"(OCR↔文本不匹配)"
+            )
+
+        if not stage1_candidates:
+            return []
+
         # Truncate to Top-K
         top_k = min(len(stage1_candidates), self.config.PARAGRAPH_MATCH_STAGE1_TOP_K)
         stage1_candidates = stage1_candidates[:top_k]

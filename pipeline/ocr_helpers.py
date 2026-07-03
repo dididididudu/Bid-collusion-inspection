@@ -376,7 +376,7 @@ def aggregate_ocr_paragraphs(
     # 报价
     quotes = extractor._extract_quotes(all_text)
 
-    # 虚拟 ChunkResult
+    # 虚拟 ChunkResult（标记 source="ocr"）
     chunk_result = ChunkResult(
         doc_id=doc_id,
         chunk_index=OCR_CHUNK_INDEX,
@@ -388,6 +388,7 @@ def aggregate_ocr_paragraphs(
         simhash=simhash,
         quotes=quotes,
         image_hashes=[],
+        source="ocr",
     )
     cache.store_chunk(chunk_result)
 

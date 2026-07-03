@@ -106,6 +106,7 @@ class ChunkResult:
     simhash: str = ""
     quotes: List[float] = field(default_factory=list)
     image_hashes: List[str] = field(default_factory=list)
+    source: str = "text"             # "text"=普通文本, "ocr"=OCR识别文字
 
 
 @dataclass

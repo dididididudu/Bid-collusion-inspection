@@ -451,13 +451,14 @@ class ImageMatcher:
         ocr_b: List[OCRResult],
         result: ImageMatchResult,
     ):
-        """L4: PS 嫌疑检测 — 多证据联合
+        """L4: PS 嫌疑检测 — 双向检测
 
-        证据 1: 文字差异大但 non_text_hash 接近 → 主要证据
-        证据 2: 全图尺寸一致 → 辅助证据
-        证据 3: 文字长度近似但内容不同 → 辅助证据
+        场景A（旧L2逻辑）: 文字相同/高度相似 + 图片本身不同
+          → 同一段文字被用于不同背景的图片（如套模板改样式）
+        场景B（新L4逻辑）: 文字不同 + non_text_hash 接近
+          → 同一张背景图上改了文字
 
-        满足证据1 + 至少一个辅助证据 → PS 嫌疑确认
+        满足任一场景 → PS 嫌疑确认
         """
         ps_pairs = []
 
@@ -468,64 +469,59 @@ class ImageMatcher:
                 if len(rb.text) < self.TEXT_MIN_LENGTH:
                     continue
 
-                # 文字相似度
                 text_sim = self._text_similarity(ra.text, rb.text)
-                if text_sim >= self.PS_TEXT_SIMILARITY_MAX:
-                    continue
 
-                # === 证据1: non_text_hash 比对 ===
-                non_text_evidence = False
-                non_text_dist = 999
+                # === 场景B: 文字不同 + non_text_hash 接近 ===
+                # PS 嫌疑定义：图片（背景）相同但文字被修改过
+                if text_sim < self.PS_TEXT_SIMILARITY_MAX:
+                    non_text_evidence = False
+                    non_text_dist = 999
 
-                if ra.non_text_hash and rb.non_text_hash:
-                    non_text_dist = ImageHasher.hamming_distance(
-                        ra.non_text_hash, rb.non_text_hash
-                    )
-                    if non_text_dist <= self.NON_TEXT_HASH_SIMILAR:
-                        non_text_evidence = True
-                elif ra.image_hash and rb.image_hash:
-                    # 回退：全图 hash 接近也是弱证据
-                    full_dist = ImageHasher.hamming_distance(
-                        ra.image_hash, rb.image_hash
-                    )
-                    if full_dist <= self.NON_TEXT_HASH_SIMILAR:
-                        non_text_dist = full_dist
-                        non_text_evidence = True
+                    if ra.non_text_hash and rb.non_text_hash:
+                        non_text_dist = ImageHasher.hamming_distance(
+                            ra.non_text_hash, rb.non_text_hash
+                        )
+                        if non_text_dist <= self.NON_TEXT_HASH_SIMILAR:
+                            non_text_evidence = True
+                    elif ra.image_hash and rb.image_hash:
+                        full_dist = ImageHasher.hamming_distance(
+                            ra.image_hash, rb.image_hash
+                        )
+                        if full_dist <= self.NON_TEXT_HASH_SIMILAR:
+                            non_text_dist = full_dist
+                            non_text_evidence = True
 
-                if not non_text_evidence:
-                    continue
+                    if not non_text_evidence:
+                        continue
 
-                # === 证据2: 图片尺寸比对 ===
-                dimension_evidence = False
-                if ra.image_width > 0 and rb.image_width > 0:
-                    w_ratio = max(ra.image_width, rb.image_width) / max(1, min(ra.image_width, rb.image_width))
-                    h_ratio = max(ra.image_height, rb.image_height) / max(1, min(ra.image_height, rb.image_height))
-                    if w_ratio <= 1.0 + self.PS_DIMENSION_TOLERANCE and \
-                       h_ratio <= 1.0 + self.PS_DIMENSION_TOLERANCE:
-                        dimension_evidence = True
+                    # 辅助证据
+                    dimension_evidence = False
+                    if ra.image_width > 0 and rb.image_width > 0:
+                        w_ratio = max(ra.image_width, rb.image_width) / max(1, min(ra.image_width, rb.image_width))
+                        h_ratio = max(ra.image_height, rb.image_height) / max(1, min(ra.image_height, rb.image_height))
+                        if w_ratio <= 1.0 + self.PS_DIMENSION_TOLERANCE and \
+                           h_ratio <= 1.0 + self.PS_DIMENSION_TOLERANCE:
+                            dimension_evidence = True
 
-                # === 证据3: 文字长度近似 ===
-                len_evidence = False
-                text_len_a = len(ra.text)
-                text_len_b = len(rb.text)
-                if text_len_a > 0 and text_len_b > 0:
-                    len_ratio = max(text_len_a, text_len_b) / max(1, min(text_len_a, text_len_b))
-                    if len_ratio <= 1.5:  # 文字量级相同
-                        len_evidence = True
+                    len_evidence = False
+                    text_len_a = len(ra.text)
+                    text_len_b = len(rb.text)
+                    if text_len_a > 0 and text_len_b > 0:
+                        len_ratio = max(text_len_a, text_len_b) / max(1, min(text_len_a, text_len_b))
+                        if len_ratio <= 1.5:
+                            len_evidence = True
 
-                # === 联合判决 ===
-                evidence_count = 1 + (1 if dimension_evidence else 0) + (1 if len_evidence else 0)
-                if evidence_count >= 2:
-                    result.ps_suspicious_count += 1
-                    ps_pairs.append({
-                        'text_a': ra.text[:80],
-                        'text_b': rb.text[:80],
-                        'text_sim': round(text_sim, 3),
-                        'non_text_dist': non_text_dist,
-                        'dimension_match': dimension_evidence,
-                        'len_similar': len_evidence,
-                        'evidence_count': evidence_count,
-                    })
+                    evidence_count = 1 + (1 if dimension_evidence else 0) + (1 if len_evidence else 0)
+                    if evidence_count >= 2:
+                        result.ps_suspicious_count += 1
+                        ps_pairs.append({
+                            'text_a': ra.text[:80],
+                            'text_b': rb.text[:80],
+                            'text_sim': round(text_sim, 3),
+                            'non_text_dist': non_text_dist,
+                            'scenario': 'B_背景相同_文字不同',
+                            'evidence_count': evidence_count,
+                        })
 
         result.ps_details = ps_pairs
 

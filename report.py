@@ -316,13 +316,34 @@ summary:hover {{ background: #bbdefb; }}
                 conf = pair.get('confidence', 0)
                 orb = pair.get('orb_match_ratio', 0)
                 hist = pair.get('histogram_correlation', 0)
+                reasons = pair.get('reasons', [])
+
+                # 每层检测状态标签
+                l1 = pair.get('l1_pass', False)
+                l2 = pair.get('l2_pass', False)
+                l3 = pair.get('l3_pass', False)
+                _layer = lambda ok, lbl, emoji: f"<span style='margin:0 4px;padding:1px 6px;border-radius:10px;font-size:11px;background:{'#e8f5e8' if ok else '#ffebee'};color:{'#2e7d32' if ok else '#c62828'};'>{emoji} {lbl}</span>"
+
+                # 标记该对的问题类型
+                issue_tags = []
+                if l1:
+                    issue_tags.append("<span style='background:#e3f2fd;padding:2px 8px;border-radius:10px;font-size:11px;'>🔵 L1哈希匹配</span>")
+                if not l2 and l1 and thumb_a and thumb_b:
+                    issue_tags.append("<span style='background:#fff3e0;padding:2px 8px;border-radius:10px;font-size:11px;'>🟠 L2结构可能不同(ORB)</span>")
+                if not l3 and l2 and thumb_a and thumb_b:
+                    issue_tags.append("<span style='background:#ffebee;padding:2px 8px;border-radius:10px;font-size:11px;'>🔴 L3颜色可能不同(直方图)</span>")
 
                 parts.append(f"""
 <div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin:10px 0;background:#fafafa;'>
   <div style='font-size:13px;color:#2c3e50;margin-bottom:8px;'>
-    <strong>#{idx+1}</strong> — 置信度: {conf:.3f}
-    <span style='color:#7f8c8d;font-size:12px;margin-left:10px;'>{' | '.join(pair.get('reasons', []))}</span>
+    <strong>#{idx+1}</strong>
+    {_layer(l1, 'L1哈希', '✅')}
+    {_layer(bool(l2 or not thumb_a), 'L2结构', '✅' if l2 else '⏭️')}
+    {_layer(bool(l3 or not thumb_a), 'L3颜色', '✅' if l3 else '⏭️')}
+    <span style='margin-left:8px;font-size:12px;'>置信度: {conf:.3f}</span>
   </div>
+  <div style='margin-bottom:6px;font-size:12px;'>{' '.join(issue_tags)}</div>
+  <div style='font-size:11px;color:#7f8c8d;margin-bottom:6px;'>{' | '.join(reasons)}</div>
   <div style='display:flex;gap:15px;flex-wrap:wrap;'>
     <div style='text-align:center;flex:1;min-width:120px;'>
       <div style='font-size:11px;color:#7f8c8d;margin-bottom:4px;'>文档A — {pair.get('source_a','')}</div>

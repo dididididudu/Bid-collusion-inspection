@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>投标文件串标围标检测报告</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Microsoft YaHei', '微软雅黑', sans-serif; background: #f5f6fa; color: #2c3e50; line-height: 1.6; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.header { background: linear-gradient(135deg, #2c3e50, #3498db); color: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; }
+.header h1 { font-size: 24px; margin-bottom: 10px; }
+.header .meta { font-size: 14px; opacity: 0.8; }
+.stats { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }
+.stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); flex: 1; min-width: 150px; text-align: center; }
+.stat-card .number { font-size: 32px; font-weight: bold; color: #2c3e50; }
+.stat-card .label { font-size: 13px; color: #7f8c8d; margin-top: 5px; }
+.stat-card.high .number { color: #e74c3c; }
+.result-card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+.result-card h2 { font-size: 18px; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #ecf0f1; }
+.risk-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; color: white; }
+.match-item { background: #f8f9fa; padding: 15px; border-radius: 6px; margin: 10px 0; border-left: 4px solid #3498db; }
+.match-item.clone { border-left-color: #e74c3c; }
+.match-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px; }
+.match-sim { font-size: 18px; font-weight: bold; }
+.clone-block { background: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 6px; margin: 10px 0; }
+.text-compare { display: flex; gap: 15px; margin-top: 10px; }
+.text-col { flex: 1; background: white; padding: 12px; border-radius: 4px; border: 1px solid #dee2e6; font-size: 13px; max-height: 600px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+.text-col h4 { margin-bottom: 8px; color: #495057; position: sticky; top: 0; background: white; padding-bottom: 5px; border-bottom: 1px solid #eee; }
+.highlight { background: #ffeb3b; padding: 2px 4px; border-radius: 2px; font-weight: bold; }
+.common-text { background: #e8f5e9; padding: 10px; border-radius: 4px; margin: 8px 0; font-size: 13px; border-left: 3px solid #4caf50; white-space: pre-wrap; word-break: break-all; }
+.common-text .label { font-weight: bold; color: #2e7d32; font-size: 12px; }
+summary { cursor: pointer; padding: 8px; background: #e3f2fd; border-radius: 4px; font-weight: bold; }
+summary:hover { background: #bbdefb; }
+.file-profiles { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }
+.file-profile { background: white; padding: 15px 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); flex: 1; min-width: 200px; }
+.file-profile h3 { font-size: 15px; margin-bottom: 5px; }
+.file-profile .risk { font-size: 14px; font-weight: bold; }
+.footer { text-align: center; padding: 20px; color: #95a5a6; font-size: 13px; }
+.section-title { background: #2c3e50; color: white; padding: 8px 15px; border-radius: 4px; margin: 15px 0 10px 0; font-size: 15px; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>📋 投标文件串标围标检测报告</h1>
+<div class="meta">报告ID: fbf35269-7543-4a1d-93c9-bc61ae01823f | 生成时间: 2026-07-03T15:48:48.260474</div>
+</div>
+
+<div class="stats">
+<div class="stat-card"><div class="number">2</div><div class="label">检测文件数</div></div>
+<div class="stat-card"><div class="number">1</div><div class="label">比对总对数</div></div>
+<div class="stat-card"><div class="number">1</div><div class="label">可疑对数</div></div>
+<div class="stat-card high"><div class="number">1</div><div class="label">高风险对数</div></div>
+</div>
+
+<div class="file-profiles">
+<h2 style="width:100%;margin-bottom:10px;">📁 文件风险画像</h2>
+
+<div class="file-profile">
+<h3>测试6.pdf</h3>
+<div class="risk" style="color:#e74c3c;">🔴 HIGH</div>
+<div style="font-size:13px;color:#7f8c8d;">关联可疑数: 1</div>
+</div>
+<div class="file-profile">
+<h3>测试7.pdf</h3>
+<div class="risk" style="color:#e74c3c;">🔴 HIGH</div>
+<div style="font-size:13px;color:#7f8c8d;">关联可疑数: 1</div>
+</div></div><h2 style='margin-bottom:15px;'>🔍 相似文档对详情（完整相似内容）</h2>
+<div class="result-card">
+<h2>#1 测试6.pdf ↔ 测试7.pdf</h2>
+<div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
+<div><strong>📊 文本相似度:</strong> <span style="font-size:18px;color:#e74c3c;">0.8308</span></div>
+<div><strong>📝 相似等级:</strong> 中度相似</div>
+<div><strong>⚠ 风险评级:</strong> <span class="risk-badge" style="background:#e74c3c;">HIGH</span></div>
+<div><strong>🔗 相似段落:</strong> 3 对</div>
+<div><strong>📎 克隆块:</strong> 1 个</div>
+</div><div class='section-title'>⚠ 连续克隆块 — 连续雷同段落（最强围标证据）</div>
+<div class="clone-block">
+<strong>克隆块 [clone_block_0]</strong> |
+连续 <strong>3</strong> 段雷同 |
+平均相似度: <strong>0.8483</strong><br>
+<strong>段落序列:</strong> A[0]↔B[0], A[2]↔B[0], A[2]↔B[1]
+</div>
+<div class="match-item clone">
+<div class="match-header">
+<span class="match-sim">相似度: 0.9480</span>
+<span style="font-size:13px;color:#7f8c8d;">方法: SBERT [连续克隆]</span>
+<span style="font-size:12px;color:#95a5a6;">
+  A[测试6.pdf] 第[0]段 ↔ B[测试7.pdf] 第[0]段
+</span>
+</div><div class='text-compare'><div class='text-col'>
+<h4>📄 文档A — 测试6.pdf 第[0]段</h4>
+为保证整体平台的任务训练系统稳定运行，智能运维管控系统开发平台主要保证系统中模型训练发生的各种异常，进行提前预警与监测。智能运维管控系统开发平台针对模型在训练过程中因其特性而易发生的问题进行剖析、归类归因，搭建一套更符合模型训练的智能运维管控系统开发平台，
+</div><div class='text-col'>
+<h4>📄 文档B — 测试7.pdf 第[0]段</h4>
+为保障平台任务训练体系的持续稳定运转，该智能运维管控开发平台致力于对模型训练环节出现的各类异常状况实施前瞻性预警与实时监测。本运维管控开发平台深入剖析模型训练期间由其固有特性引发的潜在故障，对各类问题进行系统梳理与根源追溯，构建一套高度适配模型训练场景的智能化运维管控体系，在训练全流程中实现异常侦测与风险预警。核心目标涵盖：
+1）贯穿全周期的健康态势感知能力：涵盖模型训练与模型推理服务的完整生命周期，对多维度核心指标实施动态追踪。依托实时监测与深度解析，平台可精确识别潜在缺陷，追溯问题本质，并给出针对性的优化路径。
+2）
+</div></div></div>
+<div class="match-item clone">
+<div class="match-header">
+<span class="match-sim">相似度: 0.8555</span>
+<span style="font-size:13px;color:#7f8c8d;">方法: SBERT [连续克隆]</span>
+<span style="font-size:12px;color:#95a5a6;">
+  A[测试6.pdf] 第[2]段 ↔ B[测试7.pdf] 第[1]段
+</span>
+</div><div class='text-compare'><div class='text-col'>
+<h4>📄 文档A — 测试6.pdf 第[2]段</h4>
+周期等多个关键维度指标的监控。通过实时监控和分析，该系统能够精准地定位存在的问题，进一步分析问题的根源，并提供明确的改进方向。在深度神经网络训练中，时间和计算成本的高昂是一个显著问题，平台考虑到长时间的训练需求，特引入异常预警机制，使用评估算法替代人类专家决策，实现性能不佳任务的提前终止，减少不必要的时间通过异常预警和提前终止，可以更有效地管理资源，提高的效率和为保证整体平台的任务训练系统稳定运行，智能运维管控系统开发平台主要保证系统中模型训练发生的各种异常，进行提前预警与监测。
+</div><div class='text-col'>
+<h4>📄 文档B — 测试7.pdf 第[1]段</h4>
+2）风险预警与任务早停机制：深度神经网络训练往往伴随巨大的时间开销与算力消耗，鉴于此，平台内置智能预警模块，以自动化评估策略取代人工研判，对收敛不佳或表现劣化的训练任务实施提前终止，从而规避无效的资源投入。借助该预警与早停机制，能够显著提升资源调度效率，增强训练成效。为保障平台任务训练体系的持续稳定运转，该智能运维管控开发平台致力于对模型训练环节出现的各类异常状况实施前瞻性预警与实时监测。
+</div></div></div>
+<div class="match-item clone">
+<div class="match-header">
+<span class="match-sim">相似度: 0.7413</span>
+<span style="font-size:13px;color:#7f8c8d;">方法: SBERT [连续克隆]</span>
+<span style="font-size:12px;color:#95a5a6;">
+  A[测试6.pdf] 第[2]段 ↔ B[测试7.pdf] 第[0]段
+</span>
+</div><div class='text-compare'><div class='text-col'>
+<h4>📄 文档A — 测试6.pdf 第[2]段</h4>
+周期等多个关键维度指标的监控。通过实时监控和分析，该系统能够精准地定位存在的问题，进一步分析问题的根源，并提供明确的改进方向。在深度神经网络训练中，时间和计算成本的高昂是一个显著问题，平台考虑到长时间的训练需求，特引入异常预警机制，使用评估算法替代人类专家决策，实现性能不佳任务的提前终止，减少不必要的时间通过异常预警和提前终止，可以更有效地管理资源，提高的效率和为保证整体平台的任务训练系统稳定运行，智能运维管控系统开发平台主要保证系统中模型训练发生的各种异常，进行提前预警与监测。
+</div><div class='text-col'>
+<h4>📄 文档B — 测试7.pdf 第[0]段</h4>
+为保障平台任务训练体系的持续稳定运转，该智能运维管控开发平台致力于对模型训练环节出现的各类异常状况实施前瞻性预警与实时监测。本运维管控开发平台深入剖析模型训练期间由其固有特性引发的潜在故障，对各类问题进行系统梳理与根源追溯，构建一套高度适配模型训练场景的智能化运维管控体系，在训练全流程中实现异常侦测与风险预警。核心目标涵盖：
+1）贯穿全周期的健康态势感知能力：涵盖模型训练与模型推理服务的完整生命周期，对多维度核心指标实施动态追踪。依托实时监测与深度解析，平台可精确识别潜在缺陷，追溯问题本质，并给出针对性的优化路径。
+2）
+</div></div></div></div>
+<div class="footer">
+<p>本报告由 投标文件串标围标检测系统 自动生成 | 结果仅供参考，请结合人工审核</p>
+</div>
+</div>
+</body>
+</html>

@@ -259,70 +259,207 @@ class PyMuPDFExtractor(BasePDFExtractor):
     # 图片提取方法
     # ============================================================
 
+    def _merge_overlapping_bboxes(
+        self, bboxes: List[Tuple[float, float, float, float]], gap: float = 10
+    ) -> List[Tuple[float, float, float, float]]:
+        """合并相邻/重叠的 bbox 矩形
+
+        Word→PDF 会将一张大图切分为多个相邻的图块（tile），
+        合并后还原为完整的大图区域，统一渲染和哈希。
+
+        Args:
+            bboxes: [(x0, y0, x1, y1), ...] 坐标列表
+            gap: 合并容差（像素），间距小于此值的矩形被合并
+
+        Returns:
+            合并后的 bbox 列表
+        """
+        if not bboxes:
+            return []
+
+        merged = [list(b) for b in bboxes]
+        changed = True
+        while changed:
+            changed = False
+            new_list = []
+            used = [False] * len(merged)
+            for i in range(len(merged)):
+                if used[i]:
+                    continue
+                cur = merged[i][:]
+                for j in range(i + 1, len(merged)):
+                    if used[j]:
+                        continue
+                    o = merged[j]
+                    # 检查是否在 gap 范围内相交
+                    if (cur[0] - gap <= o[2] and cur[2] + gap >= o[0] and
+                        cur[1] - gap <= o[3] and cur[3] + gap >= o[1]):
+                        cur[0] = min(cur[0], o[0])
+                        cur[1] = min(cur[1], o[1])
+                        cur[2] = max(cur[2], o[2])
+                        cur[3] = max(cur[3], o[3])
+                        used[j] = True
+                        changed = True
+                new_list.append(tuple(cur))
+                used[i] = True
+            merged = new_list
+        return merged
+
+    def _render_region(self, page, bbox, page_w, page_h, min_size, zoom=200/72.0):
+        """渲染页面指定区域并返回 pHash，失败返回 None"""
+        try:
+            x0, y0, x1, y1 = bbox
+            x0 = max(0, x0 - 2)
+            y0 = max(0, y0 - 2)
+            x1 = min(page_w, x1 + 2)
+            y1 = min(page_h, y1 + 2)
+            if x1 - x0 < min_size or y1 - y0 < min_size:
+                return None
+            import fitz
+            mat = fitz.Matrix(zoom, zoom)
+            clip = fitz.Rect(x0, y0, x1, y1)
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            if img.size[0] > 1000 or img.size[1] > 1000:
+                img.thumbnail((512, 512), Image.LANCZOS)
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            return imagehash.phash(img)
+        except Exception as e:
+            logger.debug(f"区域渲染失败 ({bbox}): {e}")
+            return None
+
     def _extract_embedded_images(
         self, doc, start_page: int, end_page: int
     ) -> List[str]:
-        """提取嵌入图片的感知哈希（文本 PDF 中的 logo、印章、图表等）
+        """提取嵌入图片的感知哈希（处理 Word→PDF 图块合并）
 
-        使用 PyMuPDF 的 get_images() 获取嵌入图片列表，
-        然后提取每个图片并计算 pHash。
-
-        Args:
-            doc: fitz.Document 对象
-            start_page: 起始页码（0-based）
-            end_page: 结束页码（0-based，不含）
+        三路策略：
+        1. cluster_drawings() — 检测矢量绘图集群（Word→PDF 切碎的大图）
+        2. get_image_info() + bbox 合并 — 检测嵌入图片集群
+        3. extract_image() — 孤立的嵌入图片（兜底）
 
         Returns:
             感知哈希字符串列表
         """
+        import fitz
         hashes = []
+        min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
+        zoom = 200 / 72.0
+
         for page_num in range(start_page, min(end_page, doc.page_count)):
             try:
                 page = doc[page_num]
-                # 获取页面上所有嵌入图片的列表
+                page_w = page.rect.width
+                page_h = page.rect.height
+                rendered_regions = []  # 已渲染的区域，避免重复
+
+                # === 策略1: cluster_drawings 检测矢量绘图集群 ===
+                try:
+                    clusters = page.cluster_drawings(
+                        x_tolerance=10, y_tolerance=10, final_filter=False
+                    )
+                    for cl in clusters:
+                        bbox = (cl.x0, cl.y0, cl.x1, cl.y1)
+                        w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
+                        if w < 50 or h < 50:
+                            continue
+                        ph = self._render_region(page, bbox, page_w, page_h, min_size, zoom)
+                        if ph is not None:
+                            hashes.append(f"p{ph}")
+                            rendered_regions.append(bbox)
+                except Exception:
+                    pass
+
+                # === 策略2: get_image_info + bbox 合并 ===
+                image_info = page.get_image_info()
+                all_bboxes = []
+                for info in image_info:
+                    bbox = info.get('bbox')
+                    if bbox and len(bbox) == 4:
+                        x0, y0, x1, y1 = bbox
+                        if (x1-x0) >= min_size and (y1-y0) >= min_size \
+                           and x0 > -10 and y0 > -10 \
+                           and x1 < page_w + 10 and y1 < page_h + 10:
+                            all_bboxes.append(bbox)
+
+                if all_bboxes:
+                    # 过滤掉已被 cluster_drawings 覆盖的区域
+                    remaining = []
+                    for b in all_bboxes:
+                        covered = False
+                        for rb in rendered_regions:
+                            ix = max(b[0], rb[0]); iy = max(b[1], rb[1])
+                            ix2 = min(b[2], rb[2]); iy2 = min(b[3], rb[3])
+                            if ix < ix2 and iy < iy2:
+                                overlap = (ix2-ix)*(iy2-iy)
+                                area_b = (b[2]-b[0])*(b[3]-b[1])
+                                if area_b > 0 and overlap/area_b > 0.5:
+                                    covered = True
+                                    break
+                        if not covered:
+                            remaining.append(b)
+
+                    merged = self._merge_overlapping_bboxes(remaining, gap=8)
+                    for bbox in merged:
+                        ph = self._render_region(page, bbox, page_w, page_h, min_size, zoom)
+                        if ph is not None:
+                            hashes.append(f"p{ph}")
+                            rendered_regions.append(bbox)
+
+                # === 策略3: 兜底 — 孤立图片直接用 extract_image ===
                 image_list = page.get_images(full=True)
-                if not image_list:
-                    continue
+                if image_list:
+                    for img_info in image_list:
+                        try:
+                            xref = img_info[0]
+                            # 获取这个图片的 bbox
+                            img_name = img_info[7] if len(img_info) > 7 else None
+                            img_bbox = None
+                            if img_name:
+                                try:
+                                    bobj = page.get_image_bbox(img_name)
+                                    if bobj:
+                                        img_bbox = (bobj.x0, bobj.y0, bobj.x1, bobj.y1)
+                                except Exception:
+                                    pass
+                            # 检查是否已被覆盖
+                            if img_bbox:
+                                covered = False
+                                for rb in rendered_regions:
+                                    ix = max(img_bbox[0], rb[0]); iy = max(img_bbox[1], rb[1])
+                                    ix2 = min(img_bbox[2], rb[2]); iy2 = min(img_bbox[3], rb[3])
+                                    if ix < ix2 and iy < iy2:
+                                        overlap = (ix2-ix)*(iy2-iy)
+                                        area = (img_bbox[2]-img_bbox[0])*(img_bbox[3]-img_bbox[1])
+                                        if area > 0 and overlap/area > 0.5:
+                                            covered = True
+                                            break
+                                if covered:
+                                    continue
 
-                for img_info in image_list:
-                    try:
-                        # img_info: (xref, smask, width, height, bpc, colorspace, ...)
-                        xref = img_info[0]
-                        # 过滤太小的图片（默认 <50x50 像素，通常是图标/装饰）
-                        width, height = img_info[2], img_info[3]
-                        min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
-                        if width < min_size or height < min_size:
+                            # 过滤和提取
+                            w, h = img_info[2], img_info[3]
+                            if w < min_size or h < min_size:
+                                continue
+                            base = doc.extract_image(xref)
+                            if not base or not base.get("image"):
+                                continue
+                            img_bytes = base["image"]
+                            if len(img_bytes) < 1024:
+                                continue
+                            img = Image.open(io.BytesIO(img_bytes))
+                            if img.size[0] > 1000 or img.size[1] > 1000:
+                                img.thumbnail((512, 512), Image.LANCZOS)
+                            if img.mode not in ('RGB', 'L'):
+                                img = img.convert('RGB')
+                            ph = imagehash.phash(img)
+                            hashes.append(f"p{ph}")
+                        except Exception:
                             continue
-
-                        # 提取图片数据
-                        base_image = doc.extract_image(xref)
-                        if base_image is None:
-                            continue
-
-                        image_bytes = base_image.get("image")
-                        if not image_bytes or len(image_bytes) < 1024:
-                            continue
-
-                        # 打开图片并计算感知哈希
-                        img = Image.open(io.BytesIO(image_bytes))
-                        # 过大图片先缩小（加速哈希计算）
-                        if img.size[0] > 1000 or img.size[1] > 1000:
-                            img.thumbnail((512, 512), Image.LANCZOS)
-
-                        if img.mode not in ('RGB', 'L'):
-                            img = img.convert('RGB')
-
-                        phash = imagehash.phash(img)
-                        hashes.append(f"p{phash}")
-
-                    except Exception as e:
-                        logger.debug(
-                            f"嵌入图片提取失败 (xref={img_info[0]}): {e}"
-                        )
-                        continue
 
             except Exception as e:
-                logger.debug(f"页面 {page_num} 嵌入图片提取失败: {e}")
+                logger.debug(f"页面 {page_num} 图片提取失败: {e}")
                 continue
 
         return hashes

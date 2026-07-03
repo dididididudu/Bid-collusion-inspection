@@ -1310,6 +1310,24 @@ class BidDetectionOrchestrator:
         evidence.image_risk_score = match_result.image_risk_score
         evidence.image_risk_factors = match_result.image_risk_factors
 
+        # 填充逐对图片详情（供报告逐对展示检测层标签）
+        for v in match_result.image_verdicts:
+            evidence.matched_image_pairs.append({
+                'phash_dist': v.phash_dist,
+                'dhash_dist': v.dhash_dist,
+                'orb_match_ratio': round(v.orb_match_ratio, 3),
+                'histogram_correlation': round(v.histogram_correlation, 3),
+                'confidence': round(v.confidence, 3),
+                'reasons': v.reasons,
+                'l1_pass': v.l1_pass,
+                'l2_pass': v.l2_pass,
+                'l3_pass': v.l3_pass,
+                'source_a': v.sig_a.source_id,
+                'source_b': v.sig_b.source_id,
+            })
+        evidence.matched_text_pairs = match_result.text_matches
+        evidence.ps_detail_list = match_result.ps_details
+
         return evidence
 
     def _build_text_evidence(

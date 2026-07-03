@@ -30,7 +30,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 6  # v6: image_ocr_results 新增 thumbnail 列
+    SCHEMA_VERSION = 7  # v7: paragraphs 新增 source 列 (text/ocr)
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -117,6 +117,9 @@ class DocumentCache:
             # v6 迁移：image_ocr_results 新增 thumbnail 列
             if current_version < 6:
                 self._migrate_v6(cursor)
+            # v7 迁移：paragraphs 新增 source 列
+            if current_version < 7:
+                self._migrate_v7(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -214,6 +217,16 @@ class DocumentCache:
                 "ADD COLUMN thumbnail BLOB DEFAULT NULL"
             )
             logger.info("v6 迁移完成：新增 thumbnail 列")
+        except Exception:
+            pass
+
+    def _migrate_v7(self, cursor):
+        """v7 迁移：paragraphs 新增 source 列 (text/ocr)"""
+        try:
+            cursor.execute(
+                "ALTER TABLE paragraphs ADD COLUMN source TEXT DEFAULT 'text'"
+            )
+            logger.info("v7 迁移完成：paragraphs 新增 source 列")
         except Exception:
             pass
 
@@ -532,10 +545,21 @@ class DocumentCache:
                     zip(chunk_result.paragraphs, chunk_result.paragraph_hashes)
                 )
             ]
+            source = getattr(chunk_result, 'source', 'text')
+            para_rows = [
+                (
+                    self._para_id(chunk_result.doc_id, para_idx),
+                    chunk_result.doc_id, chunk_id,
+                    para_idx, para_text, para_hash, source
+                )
+                for para_idx, (para_text, para_hash) in enumerate(
+                    zip(chunk_result.paragraphs, chunk_result.paragraph_hashes)
+                )
+            ]
             conn.executemany("""
                 INSERT OR REPLACE INTO paragraphs (
-                    para_id, doc_id, chunk_id, para_index, text, minhash
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    para_id, doc_id, chunk_id, para_index, text, minhash, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, para_rows)
 
     def load_chunk_text(self, doc_id: str, chunk_index: int) -> Optional[str]:
@@ -633,6 +657,24 @@ class DocumentCache:
             (doc_id,)
         )
         return {row[0]: row[1] for row in cursor.fetchall() if row[1]}
+
+    def get_paragraph_source_map(self, doc_id: str) -> Dict[int, str]:
+        """获取段落类型映射（para_index -> 'text'|'ocr'）"""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT para_index, source FROM paragraphs "
+                "WHERE doc_id = ? ORDER BY para_index",
+                (doc_id,)
+            )
+            return {row[0]: row[1] or 'text' for row in cursor.fetchall()}
+        except Exception:
+            # 兼容旧库（无 source 列）
+            cursor.execute(
+                "SELECT para_index FROM paragraphs WHERE doc_id = ? ORDER BY para_index",
+                (doc_id,)
+            )
+            return {row[0]: 'text' for row in cursor.fetchall()}
 
     def load_paragraphs_in_range(self, doc_id: str, start_idx: int, end_idx: int) -> List[Dict]:
         """加载指定范围的段落数据（含文本和 MinHash）"""
@@ -979,6 +1021,9 @@ class DocumentCache:
             'shared_typo_count': ie.shared_typo_count,
             'text_identical_count': ie.text_identical_count,
             'text_similar_count': ie.text_similar_count,
+            'matched_image_pairs': ie.matched_image_pairs,
+            'matched_text_pairs': ie.matched_text_pairs,
+            'ps_detail_list': ie.ps_detail_list,
             # 段落证据
             'detection_summary': text_ev.detection_summary,
             'common_paragraphs': text_ev.common_paragraphs[:10],
@@ -1111,6 +1156,9 @@ class DocumentCache:
                 shared_typo_count=evidence_raw.get('shared_typo_count', 0),
                 text_identical_count=evidence_raw.get('text_identical_count', 0),
                 text_similar_count=evidence_raw.get('text_similar_count', 0),
+                matched_image_pairs=evidence_raw.get('matched_image_pairs', []),
+                matched_text_pairs=evidence_raw.get('matched_text_pairs', []),
+                ps_detail_list=evidence_raw.get('ps_detail_list', []),
             )
 
             results.append(PairwiseResult(
