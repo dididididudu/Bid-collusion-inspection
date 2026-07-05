@@ -101,7 +101,7 @@ class DetectionConfig:
     DOC_VECTOR_THRESHOLD: float = 0.3  # 文档余弦相似度阈值
     # 图片 OCR
     ENABLE_OCR: bool = True              # 自动对页面图片运行 OCR
-    OCR_ENGINE: str = "paddleocr"        # OCR 引擎: "paddleocr" / "easyocr"
+    OCR_ENGINE: str = "easyocr"          # OCR 引擎: "paddleocr" / "easyocr"
     OCR_LANGUAGES: list = None           # None = 默认 ['ch_sim', 'en']
     OCR_SAMPLE_STEP: int = 1             # 每隔 N 页运行一次 OCR（1 = 每页）
     OCR_MIN_CONFIDENCE: float = 0.3      # OCR 最低置信度阈值

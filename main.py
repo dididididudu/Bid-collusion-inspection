@@ -9,6 +9,12 @@ os.environ.setdefault('USE_TF', 'FALSE')  # 阻止旧版TF与新numpy冲突
 # 注意: 不在此处设置 TRANSFORMERS_OFFLINE=1
 # 首次运行时需要在线下载/验证模型，仅在 --offline 模式下启用离线限制
 
+import multiprocessing
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass  # 已设置过
+
 import sys
 import argparse
 import logging
@@ -106,8 +112,8 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         if use_gpu:
             config.USE_GPU = True
-            config.SBERT_DEVICE = "auto"
-            logger.info("已启用 GPU 加速")
+            config._auto_detect_device()  # 自动检测并设为 "cuda" / "mps" / "cpu"
+            logger.info(f"已启用 GPU 加速 (SBERT 设备: {config.SBERT_DEVICE})")
         if no_checkpoint:
             config.ENABLE_CHECKPOINT = False
             logger.info("已禁用断点续传")
