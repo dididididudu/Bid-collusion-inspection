@@ -226,18 +226,18 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 # 提取报价
                 quotes = self._extract_quotes(chunk_text)
 
-                # 提取嵌入图片哈希（文本 PDF 中的 logo/印章/图表）
-                embedded_hashes = self._extract_embedded_images(
-                    doc, chunk_start, chunk_end
-                )
-
-                # 页级图片哈希（用于扫描版 PDF 检测，采样策略降低开销）
-                page_image_hashes = self._extract_page_image_hashes(
-                    doc, chunk_start, chunk_end
-                )
-
-                # 合并图片哈希
-                all_image_hashes = list(set(embedded_hashes + page_image_hashes))
+                # 提取图片哈希（仅在 ENABLE_PAGE_IMAGE_HASHES 启用时）
+                # 纯文本 PDF 可禁用以大幅加速（跳过高成本的全页渲染和绘图检测）
+                if getattr(self.config, 'ENABLE_PAGE_IMAGE_HASHES', True):
+                    embedded_hashes = self._extract_embedded_images(
+                        doc, chunk_start, chunk_end
+                    )
+                    page_image_hashes = self._extract_page_image_hashes(
+                        doc, chunk_start, chunk_end
+                    )
+                    all_image_hashes = list(set(embedded_hashes + page_image_hashes))
+                else:
+                    all_image_hashes = []
 
                 yield ChunkResult(
                     doc_id=doc_id,

@@ -116,6 +116,7 @@ class DetectionConfig:
 
     # 图片提取
     IMAGE_MIN_SIZE: int = 50             # 嵌入图片最小尺寸（像素），小于此值的过滤
+    ENABLE_PAGE_IMAGE_HASHES: bool = True  # 提取页级图片哈希（用于图片对比/PS检测）
 
     # 标书模板语过滤（减少因招标文件原文导致的误检）
     BID_BOILERPLATE_FILTER: bool = True  # 启用标书模板语过滤
