@@ -1,12 +1,17 @@
 {
-  "phase": 1,
-  "completed_pairs": 0,
-  "total_pairs": 0,
-  "processed_files": [],
-  "completed_pair_ids": [],
-  "start_time": "2026-07-03T16:47:31.422894",
+  "phase": 6,
+  "completed_pairs": 1,
+  "total_pairs": 1,
+  "processed_files": [
+    "test_pos\\doc_a.pdf",
+    "test_pos\\doc_b.pdf"
+  ],
+  "completed_pair_ids": [
+    "5f592e33cf30846a::679d3172daab4c4a"
+  ],
+  "start_time": "2026-07-03T17:23:21.465513",
   "config_hash": "21cde3b57080",
-  "input_hash": "45fa0f41b9346ef6c59d2ff374991743",
+  "input_hash": "3451f6cd921f4affca77f6d9d484fbcd",
   "version": 2,
-  "updated_at": "2026-07-03T16:47:32.916554"
+  "updated_at": "2026-07-03T17:24:42.128207"
 }

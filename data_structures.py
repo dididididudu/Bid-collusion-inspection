@@ -44,9 +44,6 @@ class BidFeature:
     流式模式下：
       - text_content, paragraphs, paragraph_hashes 存储在 SQLite 中，此处为空
       - 新增 page_count, doc_minhash, chunk_count 用于快速筛选
-
-    非流式模式下（向后兼容）：
-      - 所有字段行为与之前一致
     """
     doc_id: str
     filename: str

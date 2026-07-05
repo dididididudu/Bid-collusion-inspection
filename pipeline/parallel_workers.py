@@ -144,7 +144,6 @@ def extract_single_worker(args: tuple) -> dict:
         from extraction.text_processor import ChunkedTextProcessor
 
         cache = DocumentCache(db_dir, config)
-        cache.conn.execute(f"PRAGMA busy_timeout={config.DB_BUSY_TIMEOUT}")
 
         extractor = PyMuPDFExtractor(config)
         text_processor = ChunkedTextProcessor(config)
@@ -311,7 +310,6 @@ def embed_single_worker(args: tuple) -> dict:
         from embedding.embedding_engine import EmbeddingEngine
 
         cache = DocumentCache(db_dir, config)
-        cache.conn.execute(f"PRAGMA busy_timeout={config.DB_BUSY_TIMEOUT}")
 
         engine = EmbeddingEngine(config)
         if not engine.is_available:
@@ -367,7 +365,6 @@ def analyze_pair_worker(args: tuple) -> dict:
         from scoring import RiskScoringEngine
 
         cache = DocumentCache(db_dir, config)
-        cache.conn.execute(f"PRAGMA busy_timeout={config.DB_BUSY_TIMEOUT}")
 
         doc_a = cache.load_document(doc_a_id)
         doc_b = cache.load_document(doc_b_id)
@@ -471,155 +468,19 @@ def _build_text_evidence_basic(
     doc_a: BidFeature, doc_b: BidFeature,
     paragraph_matches: List[Dict], config: DetectionConfig,
 ) -> TextEvidence:
-    """构建文本证据（基本版，不含差异高亮）
+    """构建文本证据（基本版，不含差异高亮 — 委托 evidence_builder 复用）
 
     差异高亮依赖 difflib.SequenceMatcher 且计算量大，
     在 worker 中跳过，由 report 阶段按需计算。
     """
-    import math
-
-    evidence = TextEvidence()
-    evidence.paragraph_matches = paragraph_matches
-
-    if not paragraph_matches:
-        return evidence
-
-    similarities = [m['similarity'] for m in paragraph_matches]
-    max_sim = max(similarities) if similarities else 0.0
-
-    top_k = min(config.SCORE_TOP_K, len(similarities))
-    top_k_similarities = sorted(similarities, reverse=True)[:top_k]
-    top_k_sim = sum(top_k_similarities) / top_k if top_k_similarities else 0.0
-
-    weighted_sum = sum(s * s for s in similarities)
-    weighted_mean = (
-        weighted_sum / sum(similarities) if sum(similarities) > 0 else 0.0
+    return build_text_evidence(
+        doc_a, doc_b, paragraph_matches, config, compute_highlight=False
     )
-    mean_sim = sum(similarities) / len(similarities) if similarities else 0.0
-
-    quality_score = (
-        0.50 * max_sim + 0.35 * top_k_sim + 0.15 * weighted_mean
-    )
-
-    covered_a = len(set(m['paragraph_a_index'] for m in paragraph_matches))
-    covered_b = len(set(m['paragraph_b_index'] for m in paragraph_matches))
-    estimated_total = max(1, covered_a + covered_b)
-    coverage_ratio = (
-        (covered_a + covered_b) / (estimated_total * 2)
-        if estimated_total > 0 else 0
-    )
-    coverage_score = (
-        1.0 - math.exp(-4 * coverage_ratio) if coverage_ratio > 0 else 0.0
-    )
-
-    sorted_by_a = sorted(
-        paragraph_matches, key=lambda x: x['paragraph_a_index']
-    )
-    consecutive = sum(
-        1 for k in range(1, len(sorted_by_a))
-        if (sorted_by_a[k]['paragraph_a_index'] -
-            sorted_by_a[k-1]['paragraph_a_index'] == 1 and
-            sorted_by_a[k]['paragraph_b_index'] -
-            sorted_by_a[k-1]['paragraph_b_index'] == 1)
-    )
-    consistency_score = (
-        min(1.0, 0.5 + consecutive * 0.01) if consecutive >= 3 else 0.5
-    )
-
-    evidence.local_similarity = min(
-        1.0,
-        0.60 * quality_score + 0.25 * coverage_score + 0.15 * consistency_score
-    )
-
-    clone_blocks = _detect_clone_blocks(paragraph_matches, config)
-    evidence.continuous_clone_blocks = clone_blocks
-
-    clone_index = {}
-    for block in clone_blocks:
-        for pair in block['pairs']:
-            key = (pair['a_index'], pair['b_index'])
-            clone_index[key] = {
-                'is_clone': True, 'group_id': block['group_id']
-            }
-    for match in paragraph_matches:
-        key = (match['paragraph_a_index'], match['paragraph_b_index'])
-        if key in clone_index:
-            match['is_continuous_clone'] = True
-            match['continuous_clone_group_id'] = clone_index[key]['group_id']
-
-    evidence.detection_summary = {
-        'sbert_match_count': len(paragraph_matches),
-        'continuous_clone_block_count': len(clone_blocks),
-    }
-
-    evidence.common_paragraphs = [
-        m.get('paragraph_a', '')[:200]
-        for m in paragraph_matches[:5]
-    ]
-
-    return evidence
 
 
 def _detect_clone_blocks(
     paragraph_matches: List[Dict], config: DetectionConfig
 ) -> List[Dict]:
-    """检测连续克隆块"""
-    min_len = config.CLONE_BLOCK_MIN_LENGTH
-    max_gap = config.CLONE_BLOCK_MAX_GAP
-
-    if len(paragraph_matches) < min_len:
-        return []
-
-    matches_sorted = sorted(
-        paragraph_matches,
-        key=lambda x: (x['paragraph_a_index'], x['paragraph_b_index'])
-    )
-
-    blocks = []
-    current_block = []
-    group_id = 0
-
-    for match in matches_sorted:
-        if not current_block:
-            current_block.append(match)
-        else:
-            last = current_block[-1]
-            a_gap = match['paragraph_a_index'] - last['paragraph_a_index'] - 1
-            b_gap = match['paragraph_b_index'] - last['paragraph_b_index'] - 1
-
-            if a_gap <= max_gap and b_gap <= max_gap:
-                current_block.append(match)
-            else:
-                if len(current_block) >= min_len:
-                    blocks.append({
-                        'group_id': f'clone_block_{group_id}',
-                        'pairs': [
-                            {'a_index': m['paragraph_a_index'],
-                             'b_index': m['paragraph_b_index']}
-                            for m in current_block
-                        ],
-                        'similarity': (
-                            sum(m['similarity'] for m in current_block) /
-                            len(current_block)
-                        ),
-                        'length': len(current_block),
-                    })
-                    group_id += 1
-                current_block = [match]
-
-    if len(current_block) >= min_len:
-        blocks.append({
-            'group_id': f'clone_block_{group_id}',
-            'pairs': [
-                {'a_index': m['paragraph_a_index'],
-                 'b_index': m['paragraph_b_index']}
-                for m in current_block
-            ],
-            'similarity': (
-                sum(m['similarity'] for m in current_block) /
-                len(current_block)
-            ),
-            'length': len(current_block),
-        })
-
-    return blocks
+    """检测连续克隆块（委托 evidence_builder 复用）"""
+    from pipeline.evidence_builder import _detect_clone_blocks as _dcb
+    return _dcb(paragraph_matches, config)

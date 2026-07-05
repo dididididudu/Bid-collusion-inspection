@@ -94,15 +94,13 @@ class RiskScoringEngine:
 
         # 图片维度评分（来自四层检测结果）
         image_evidence = evidence.image_evidence
-        image_score = image_evidence.image_risk_score if hasattr(image_evidence, 'image_risk_score') else 0
-        image_score = min(30, image_score)
+        image_score = min(30, image_evidence.image_risk_score)
 
         score = min(100, text_score + image_score)
 
         # 图片风险因素
-        if hasattr(image_evidence, 'image_risk_factors'):
-            for img_factor in image_evidence.image_risk_factors:
-                risk_factors.append(f"📷 {img_factor}")
+        for img_factor in image_evidence.image_risk_factors:
+            risk_factors.append(f"📷 {img_factor}")
 
         # 改进的风险评级逻辑
         clone_count = len(continuous_clone_blocks)

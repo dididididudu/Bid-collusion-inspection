@@ -22,6 +22,7 @@ from data_structures import (
     MetadataFeature, QuoteSignature
 )
 from config import DetectionConfig
+from utils.text_diff import compute_text_diff
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +43,20 @@ class DocumentCache:
         os.makedirs(cache_dir, exist_ok=True)
         self.db_path = os.path.join(cache_dir, "features.db")
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-
-        # 启用 WAL 模式提升并发写入性能
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
-        self.conn.execute("PRAGMA temp_store=MEMORY")
-        # 写锁等待超时，避免并发写入时立即 SQLITE_BUSY
         _busy_ms = getattr(config, 'DB_BUSY_TIMEOUT', 30000)
-        self.conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
+        self._apply_pragmas(self.conn, _busy_ms)
 
         self._create_schema()
         logger.info(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
+
+    @staticmethod
+    def _apply_pragmas(conn: sqlite3.Connection, busy_timeout: int = 30000) -> None:
+        """对 SQLite 连接应用性能优化 PRAGMA 配置"""
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout}")
 
     def create_thread_connection(self) -> sqlite3.Connection:
         """为工作线程创建独立的 SQLite 连接（线程安全）
@@ -61,12 +64,8 @@ class DocumentCache:
         每个线程需要自己的连接对象。使用 WAL 模式支持并发读写。
         """
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=-64000")  # 64MB per thread
-        conn.execute("PRAGMA temp_store=MEMORY")
         _busy_ms = getattr(self.config, 'DB_BUSY_TIMEOUT', 30000)
-        conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
+        self._apply_pragmas(conn, _busy_ms)
         return conn
 
     @contextmanager
@@ -535,16 +534,6 @@ class DocumentCache:
             ))
 
             # 批量存储段落数据（executemany 减少 Python-SQLite 往返）
-            para_rows = [
-                (
-                    self._para_id(chunk_result.doc_id, para_idx),
-                    chunk_result.doc_id, chunk_id,
-                    para_idx, para_text, para_hash
-                )
-                for para_idx, (para_text, para_hash) in enumerate(
-                    zip(chunk_result.paragraphs, chunk_result.paragraph_hashes)
-                )
-            ]
             source = getattr(chunk_result, 'source', 'text')
             para_rows = [
                 (
@@ -870,6 +859,17 @@ class DocumentCache:
         )
         self.conn.commit()
 
+    def _get_ocr_col_count(self) -> int:
+        """探测 image_ocr_results 表的列数（结果缓存，避免每次调 PRAGMA）"""
+        if not hasattr(self, '_ocr_col_count_cache'):
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("PRAGMA table_info(image_ocr_results)")
+                self._ocr_col_count_cache = len(cursor.fetchall())
+            except Exception:
+                self._ocr_col_count_cache = 6  # v3 最小值
+        return self._ocr_col_count_cache
+
     def load_image_ocr_results(
         self, doc_id: str
     ) -> List[Dict]:
@@ -877,13 +877,8 @@ class DocumentCache:
         import json as _json
         cursor = self.conn.cursor()
 
-        # 探测列数（兼容 v3/v4/v5）
-        col_count = 0
-        try:
-            cursor.execute("PRAGMA table_info(image_ocr_results)")
-            col_count = len(cursor.fetchall())
-        except Exception:
-            pass
+        # 使用缓存的列数（兼容 v3/v4/v5/v6+）
+        col_count = self._get_ocr_col_count()
 
         if col_count >= 10:
             # v6+: 含 non_text_hash + image_width + image_height + thumbnail
@@ -1226,7 +1221,7 @@ class DocumentCache:
 
             # 计算高亮文本和共同部分
             if text_a and text_b:
-                hl_a, hl_b, common = self._compute_text_diff_static(text_a, text_b)
+                hl_a, hl_b, common = compute_text_diff(text_a, text_b)
                 match['highlighted_text_a'] = hl_a
                 match['highlighted_text_b'] = hl_b
                 match['common_parts'] = common
@@ -1245,95 +1240,6 @@ class DocumentCache:
             (doc_id,)
         )
         return {row[0]: row[1] for row in cursor.fetchall()}
-
-    @staticmethod
-    def _compute_text_diff_static(text_a: str, text_b: str):
-        """计算两个文本的差异并生成高亮标记（静态方法）
-
-        使用 difflib.SequenceMatcher 找最长公共子串，
-        然后用【】标记相同部分。
-
-        Returns:
-            (highlighted_a, highlighted_b, common_parts):
-            - highlighted_a: 文本A的高亮版本（用【】标记相同部分）
-            - highlighted_b: 文本B的高亮版本（用【】标记相同部分）
-            - common_parts: 共同文本片段列表
-        """
-        from difflib import SequenceMatcher as SMatch
-
-        clean_a = text_a.strip()
-        clean_b = text_b.strip()
-
-        if not clean_a or not clean_b:
-            return text_a, text_b, []
-
-        sm = SMatch(None, clean_a, clean_b)
-        matching_blocks = sm.get_matching_blocks()
-
-        significant_blocks = [b for b in matching_blocks if b.size >= 10]
-
-        common_parts = []
-        for block in significant_blocks:
-            if block.size >= 10:
-                common_text = clean_a[block.a:block.a + block.size]
-                common_parts.append(common_text.strip())
-
-        common_parts.sort(key=len, reverse=True)
-        common_parts = common_parts[:20]
-
-        highlighted_a = DocumentCache._highlight_text_with_blocks(
-            clean_a, significant_blocks, 'a'
-        )
-        highlighted_b = DocumentCache._highlight_text_with_blocks(
-            clean_b, significant_blocks, 'b'
-        )
-
-        # 报告需要完整文本，50000字符基本等于不截断
-        if len(highlighted_a) > 50000:
-            highlighted_a = highlighted_a[:50000] + "\n... [文本过长，已截断]"
-        if len(highlighted_b) > 50000:
-            highlighted_b = highlighted_b[:50000] + "\n... [文本过长，已截断]"
-
-        return highlighted_a, highlighted_b, common_parts
-
-    @staticmethod
-    def _highlight_text_with_blocks(text: str, blocks: list, which: str) -> str:
-        """用匹配块标记文本中的相同部分（静态方法）"""
-        if not blocks:
-            return text
-
-        if which == 'a':
-            blocks = sorted(blocks, key=lambda b: b.a)
-        else:
-            blocks = sorted(blocks, key=lambda b: b.b)
-
-        result_parts = []
-        last_end = 0
-
-        for block in blocks:
-            if block.size < 10:
-                continue
-
-            if which == 'a':
-                start = block.a
-                end = block.a + block.size
-            else:
-                start = block.b
-                end = block.b + block.size
-
-            if start > last_end:
-                result_parts.append(text[last_end:start])
-
-            matched_text = text[start:end]
-            if len(matched_text.strip()) > 0:
-                result_parts.append(f"【{matched_text}】")
-
-            last_end = end
-
-        if last_end < len(text):
-            result_parts.append(text[last_end:])
-
-        return ''.join(result_parts)
 
     def clear_cache(self) -> None:
         """清空所有缓存数据（谨慎使用）"""

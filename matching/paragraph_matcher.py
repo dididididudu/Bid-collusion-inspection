@@ -98,6 +98,9 @@ class ParagraphMatcher:
         # === Stage 2: Text verification ===
         self._ensure_semantic_matcher()
 
+        # 初始化 valid_candidates，确保所有分支中该变量都有定义
+        valid_candidates = []
+
         if self.semantic_matcher.is_available:
             # Load paragraph texts (only for candidates)
             para_texts_a = {}
@@ -252,7 +255,7 @@ class ParagraphMatcher:
         if len(stage2_results) > self.config.PARAGRAPH_MATCH_STAGE2_TOP_K:
             stage2_results = stage2_results[:self.config.PARAGRAPH_MATCH_STAGE2_TOP_K]
 
-        vc_count = len(valid_candidates) if 'valid_candidates' in dir() else 0
+        vc_count = len(valid_candidates)
         logger.info(
             f"Stage 2 results: {vc_count} candidates -> {len(stage2_results)} matches"
         )

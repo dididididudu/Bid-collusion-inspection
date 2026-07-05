@@ -131,6 +131,20 @@ class CandidatePairSelector:
     # 新增筛选方法
     # ================================================================
 
+    @staticmethod
+    def _build_pairs_from_groups(group_dict: Dict[str, list]) -> Set[Tuple[str, str]]:
+        """从字典分组生成所有组内文档对
+
+        对每个分组（如相同 software_fingerprint），生成组内所有文档对的笛卡尔积。
+        """
+        pairs = set()
+        for group in group_dict.values():
+            if len(group) > 1:
+                for i in range(len(group)):
+                    for j in range(i + 1, len(group)):
+                        pairs.add(tuple(sorted([group[i], group[j]])))
+        return pairs
+
     def _metadata_fingerprint_filter(self, cache) -> Set[Tuple[str, str]]:
         """元数据指纹匹配：software_fingerprint 或 time_bucket 相同的文档对
 
@@ -153,15 +167,9 @@ class CandidatePairSelector:
 
         pairs = set()
         # 同一软件指纹的文档对
-        for group in sw_groups.values():
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    pairs.add(tuple(sorted([group[i], group[j]])))
+        pairs |= self._build_pairs_from_groups(sw_groups)
         # 同一时间桶的文档对
-        for group in tb_groups.values():
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    pairs.add(tuple(sorted([group[i], group[j]])))
+        pairs |= self._build_pairs_from_groups(tb_groups)
 
         return pairs
 
@@ -260,19 +268,11 @@ class CandidatePairSelector:
             if f.metadata.time_bucket:
                 time_bucket_index[f.metadata.time_bucket].append(f.doc_id)
 
+        pairs = set()
         # 同一软件指纹
-        for docs in software_index.values():
-            if len(docs) > 1:
-                for i in range(len(docs)):
-                    for j in range(i + 1, len(docs)):
-                        pairs.add(tuple(sorted([docs[i], docs[j]])))
-
+        pairs |= self._build_pairs_from_groups(software_index)
         # 同一时间桶
-        for docs in time_bucket_index.values():
-            if len(docs) > 1:
-                for i in range(len(docs)):
-                    for j in range(i + 1, len(docs)):
-                        pairs.add(tuple(sorted([docs[i], docs[j]])))
+        pairs |= self._build_pairs_from_groups(time_bucket_index)
 
         return pairs
 
@@ -287,10 +287,4 @@ class CandidatePairSelector:
             for img_hash in f.image_hashes:
                 image_index[img_hash].append(f.doc_id)
 
-        for docs in image_index.values():
-            if len(docs) > 1:
-                for i in range(len(docs)):
-                    for j in range(i + 1, len(docs)):
-                        pairs.add(tuple(sorted([docs[i], docs[j]])))
-
-        return pairs
+        return self._build_pairs_from_groups(image_index)
