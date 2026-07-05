@@ -135,8 +135,12 @@ def ocr_pages(
     ocr_engine,
     force: bool = False,
     ocr_workers: int = 1,
+    gpu_manager=None,
 ) -> int:
-    """对 PDF 中的图片运行 OCR 提取文字（支持多线程并行）
+    """对 PDF 中的图片运行 OCR 提取文字
+
+    当 GPU Manager 可用时（推荐），图片通过批量 IPC 提交到统一 GPU 进程；
+    否则回退到本地线程池（兼容旧行为）。
 
     Args:
         file_path: PDF 文件路径
@@ -144,8 +148,10 @@ def ocr_pages(
         page_count: 总页数
         cache: DocumentCache 实例
         config: DetectionConfig
-        ocr_engine: ImageOCREngine 实例
+        ocr_engine: ImageOCREngine 实例（GPU Manager 模式下可为 None）
         force: True=扫描版全页OCR, False=嵌入图片OCR
+        ocr_workers: OCR 并行线程数（GPU Manager 模式下忽略）
+        gpu_manager: GPUManager 实例（可选）
         ocr_workers: OCR 并行线程数
 
     Returns:
@@ -153,9 +159,16 @@ def ocr_pages(
     """
     if not config.ENABLE_OCR:
         return 0
-    if not ocr_engine.is_available:
-        logger.debug("OCR 引擎不可用，跳过图片文字提取")
-        return 0
+
+    # GPU Manager 路径：引擎在 Manager 进程中，本地不需要可用
+    use_gpu_manager = (
+        gpu_manager is not None
+        and gpu_manager.enabled
+    )
+    if not use_gpu_manager:
+        if not ocr_engine.is_available:
+            logger.debug("OCR 引擎不可用，跳过图片文字提取")
+            return 0
 
     if not force:
         existing_ocr = cache.load_image_ocr_results(doc_id)
@@ -250,41 +263,66 @@ def ocr_pages(
 
     logger.debug(f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别")
 
-    # 并行 OCR 识别（慢速部分）
     ocr_results = []
-    num_workers = max(1, min(ocr_workers, len(crop_tasks), os.cpu_count() or 4))
 
-    if num_workers <= 1:
-        # 串行（按原路径走，使用传进来的 ocr_engine）
-        for task in crop_tasks:
-            img_array, phash, img_w, img_h, mc, _, _, page_n = task[:8]
-            result = ocr_engine.extract(img_array)
-            result.image_hash = phash
-            result.image_width = img_w
-            result.image_height = img_h
-            result.thumbnail = _make_thumbnail(img_array)
-            result.non_text_hash = _compute_non_text_hash(img_array, result.bboxes)
-            if result.confidence >= mc and result.text.strip():
-                ocr_results.append((result, phash, img_w, img_h, page_n))
+    if use_gpu_manager:
+        # ── GPU Manager 路径：批量提交到统一 GPU 进程 ──
+        images = [t[0] for t in crop_tasks]
+        metadata = [
+            {'phash': t[1], 'img_w': t[2], 'img_h': t[3],
+             'min_conf': t[4], 'page_num': t[7]}
+            for t in crop_tasks
+        ]
+        logger.debug("OCR: 提交 %d 张图片到 GPU Manager", len(images))
+
+        batch_results, meta_list = gpu_manager.batch_ocr(images, metadata)
+        for result, meta in zip(batch_results, meta_list):
+            if result.confidence >= meta['min_conf'] and result.text.strip():
+                # 补充缩略图和非文字哈希（GPU Manager 不做这些 CPU 操作）
+                idx = metadata.index(meta) if meta in metadata else -1
+                img_array = images[idx] if 0 <= idx < len(images) else None
+                if img_array is not None:
+                    result.thumbnail = _make_thumbnail(img_array)
+                    result.non_text_hash = _compute_non_text_hash(img_array, result.bboxes)
+                ocr_results.append((
+                    result, result.image_hash or meta['phash'],
+                    result.image_width or meta['img_w'],
+                    result.image_height or meta['img_h'],
+                    meta['page_num'],
+                ))
     else:
-        # 并行
-        logger.debug(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_map = {executor.submit(_ocr_crop_worker, task): task
-                          for task in crop_tasks}
-            for future in as_completed(future_map):
-                try:
-                    ret = future.result()
-                    if ret is not None:
-                        page_n, result = ret
-                        ocr_results.append((
-                            result, result.image_hash,
-                            result.image_width, result.image_height,
-                            page_n,
-                        ))
-                except Exception as e:
-                    logger.debug(f"OCR 线程异常: {e}")
+        # ── 本地路径：多线程并行 OCR（兼容旧行为） ──
+        num_workers = max(1, min(ocr_workers, len(crop_tasks), os.cpu_count() or 4))
+
+        if num_workers <= 1:
+            for task in crop_tasks:
+                img_array, phash, img_w, img_h, mc, _, _, page_n = task[:8]
+                result = ocr_engine.extract(img_array)
+                result.image_hash = phash
+                result.image_width = img_w
+                result.image_height = img_h
+                result.thumbnail = _make_thumbnail(img_array)
+                result.non_text_hash = _compute_non_text_hash(img_array, result.bboxes)
+                if result.confidence >= mc and result.text.strip():
+                    ocr_results.append((result, phash, img_w, img_h, page_n))
+        else:
+            logger.debug(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_map = {executor.submit(_ocr_crop_worker, task): task
+                              for task in crop_tasks}
+                for future in as_completed(future_map):
+                    try:
+                        ret = future.result()
+                        if ret is not None:
+                            page_n, result = ret
+                            ocr_results.append((
+                                result, result.image_hash,
+                                result.image_width, result.image_height,
+                                page_n,
+                            ))
+                    except Exception as e:
+                        logger.debug(f"OCR 线程异常: {e}")
 
     # 批量入库（一条事务，避免逐条 commit 的开销）
     import json as _json

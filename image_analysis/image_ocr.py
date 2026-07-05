@@ -478,6 +478,141 @@ class ImageOCREngine:
 
         return OCRResult()
 
+    def extract_batch(
+        self,
+        images: List['np.ndarray'],
+        min_confidence: float = 0.3,
+    ) -> List['OCRResult']:
+        """批量 OCR 推理 — PaddleOCR 原生支持，EasyOCR 逐张调用
+
+        GPU Manager 调用此方法处理一批图片。
+        切换引擎时对调用方完全透明。
+
+        Args:
+            images: numpy 数组列表，每张 (H, W, 3) RGB
+            min_confidence: 最低置信度阈值
+
+        Returns:
+            OCRResult 列表，与 images 一一对应
+        """
+        if not images:
+            return []
+
+        if not self.is_available:
+            return [OCRResult() for _ in images]
+
+        if self._engine_type == 'paddleocr':
+            return self._extract_paddleocr_batch(images, min_confidence)
+        elif self._engine_type == 'easyocr':
+            return self._extract_easyocr_batch(images, min_confidence)
+        else:
+            return [OCRResult() for _ in images]
+
+    def _extract_easyocr_batch(
+        self, images: List['np.ndarray'], min_confidence: float
+    ) -> List['OCRResult']:
+        """EasyOCR 批量 — 逐张调用（EasyOCR 无原生 batch）"""
+        results = []
+        for img in images:
+            result = self._extract_easyocr(img)
+            if result.confidence < min_confidence:
+                result = OCRResult()
+            results.append(result)
+        return results
+
+    def _extract_paddleocr_batch(
+        self, images: List['np.ndarray'], min_confidence: float
+    ) -> List['OCRResult']:
+        """PaddleOCR 批量 — 利用原生 batch 推理
+
+        PaddleOCR 3.x: predict(list_of_images) 一次性推理
+        PaddleOCR 2.x: ocr(list_of_images) 一次性推理
+        """
+        paddle_version = getattr(self, '_paddle_version', 2)
+
+        if paddle_version >= 3:
+            raw_list = self._reader.predict(images)
+            if not isinstance(raw_list, list):
+                raw_list = [raw_list] * len(images)  # 单张结果包裹
+        else:
+            raw_list = self._reader.ocr(images, cls=False)
+            if raw_list is None:
+                raw_list = [None] * len(images)
+
+        results = []
+        for raw in raw_list:
+            result = self._parse_paddleocr_result(raw)
+            if result.confidence < min_confidence:
+                result = OCRResult()
+            results.append(result)
+        return results
+
+    def _parse_paddleocr_result(self, raw) -> 'OCRResult':
+        """解析单张图的 PaddleOCR 结果 — 与 _extract_paddleocr 保持一致
+
+        如果 raw 为 None 或空，返回空 OCRResult。
+        """
+        if not raw or (isinstance(raw, (list, tuple)) and (not raw or not raw[0])):
+            return OCRResult()
+
+        items = raw[0] if isinstance(raw, (list, tuple)) and len(raw) > 0 else raw
+        if not items:
+            return OCRResult()
+
+        texts, words, bboxes, confidences = [], [], [], []
+
+        for item in items:
+            if isinstance(item, dict):
+                rec_texts = item.get('rec_texts', item.get('text', ''))
+                rec_scores = item.get('rec_scores', item.get('confidence', 0.0))
+                dt_polys = item.get('dt_polys', None)
+                if isinstance(rec_texts, list):
+                    for t, c in zip(rec_texts,
+                                    rec_scores if isinstance(rec_scores, list)
+                                    else [rec_scores] * len(rec_texts)):
+                        if t and len(str(t).strip()) > 0:
+                            t = str(t).strip()
+                            texts.append(t)
+                            words.extend(t.split())
+                            confidences.append(float(c) if c else 0.5)
+                elif isinstance(rec_texts, str) and rec_texts.strip():
+                    texts.append(rec_texts.strip())
+                    words.extend(rec_texts.strip().split())
+                    confidences.append(float(rec_scores) if rec_scores else 0.5)
+                    # PaddleOCR 3.x bbox from dt_polys
+                    if dt_polys:
+                        for poly in (dt_polys if isinstance(dt_polys, list) else [dt_polys]):
+                            x_vals = [p[0] for p in poly] if isinstance(poly, list) else [0, 0]
+                            y_vals = [p[1] for p in poly] if isinstance(poly, list) else [0, 0]
+                            bboxes.append({
+                                'text': rec_texts.strip(),
+                                'x': int(min(x_vals)), 'y': int(min(y_vals)),
+                                'w': int(max(x_vals) - min(x_vals)),
+                                'h': int(max(y_vals) - min(y_vals)),
+                            })
+            else:
+                bbox, text, conf = item[0], item[1], item[2]
+                if text and len(text.strip()) > 0:
+                    texts.append(text.strip())
+                    words.extend(text.strip().split())
+                    if isinstance(bbox, list):
+                        x_coords = [p[0] for p in bbox]
+                        y_coords = [p[1] for p in bbox]
+                    else:
+                        x_coords, y_coords = [0, 0], [0, 0]
+                    bboxes.append({
+                        'text': text.strip(),
+                        'x': int(min(x_coords)), 'y': int(min(y_coords)),
+                        'w': int(max(x_coords) - min(x_coords)),
+                        'h': int(max(y_coords) - min(y_coords)),
+                    })
+                    confidences.append(float(conf) if conf else 0.0)
+
+        full_text = '\n'.join(texts)
+        avg_conf = float(np.mean(confidences)) if confidences else 0.0
+
+        return OCRResult(text=full_text, words=words, bboxes=bboxes, confidence=avg_conf)
+
     def _extract_easyocr(self, image: np.ndarray) -> OCRResult:
         """EasyOCR 提取（含检测+识别）"""
         raw = self._reader.readtext(image, detail=1)

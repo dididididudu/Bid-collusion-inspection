@@ -113,6 +113,11 @@ class DetectionConfig:
     PADDLEOCR_HOME: Optional[str] = None # PaddleOCR 缓存根目录（环境变量也可设置）
     OCR_RETRY_COUNT: int = 3             # OCR 单张图片失败重试次数
     ENGINE_INIT_TIMEOUT: int = 120       # 引擎初始化超时（秒）
+    OCR_BATCH_SIZE: int = 8             # GPU Manager 批量推理大小（PaddleOCR 原生支持）
+    OCR_BATCH_TIMEOUT: float = 2.0      # GPU Manager 等待凑 batch 的超时（秒）
+
+    # GPU Manager（单例进程管理所有 GPU 操作，避免多进程竞争显存）
+    GPU_MANAGER_ENABLED: bool = False    # 是否启用 GPU 管理器（--gpu 时自动开启）
 
     # 图片提取
     IMAGE_MIN_SIZE: int = 50             # 嵌入图片最小尺寸（像素），小于此值的过滤

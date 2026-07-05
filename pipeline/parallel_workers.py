@@ -127,12 +127,14 @@ def extract_single_worker(args: tuple) -> dict:
     """Phase 1 worker: 提取单个 PDF，结果存入 SQLite
 
     Args:
-        args: (file_path, config_dict, db_dir)
+        args: (file_path, config_dict, db_dir, gpu_manager_client?) → 4 元组
+              args: (file_path, config_dict, db_dir) → 3 元组（兼容旧调用）
 
     Returns:
         {"doc_id": str, "filename": str, "success": bool, "error": str}
     """
-    file_path, config_dict, db_dir = args
+    file_path, config_dict, db_dir = args[:3]
+    gpu_manager_client = args[3] if len(args) > 3 else None
 
     config = DetectionConfig(**config_dict)
     cache = None
@@ -148,8 +150,13 @@ def extract_single_worker(args: tuple) -> dict:
         extractor = PyMuPDFExtractor(config)
         text_processor = ChunkedTextProcessor(config)
 
+        # GPU Manager 模式下跳过本地引擎创建（引擎在 Manager 进程中）
+        use_gpu_mgr = (
+            gpu_manager_client is not None
+            and gpu_manager_client.enabled
+        )
         ocr_engine = None
-        if config.ENABLE_OCR:
+        if config.ENABLE_OCR and not use_gpu_mgr:
             ocr_engine = ImageOCREngine(
                 use_gpu=config.USE_GPU,
                 engine=config.OCR_ENGINE,
@@ -195,11 +202,12 @@ def extract_single_worker(args: tuple) -> dict:
                 ))
                 cache.store_document(feature)
 
-                if ocr_engine is not None:
+                if ocr_engine is not None or use_gpu_mgr:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=True,
                         ocr_workers=config.OCR_WORKERS,
+                        gpu_manager=gpu_manager_client,
                     )
                     _aggregate_ocr_paragraphs(
                         doc_id, page_count, cache, extractor, text_processor,
@@ -219,11 +227,12 @@ def extract_single_worker(args: tuple) -> dict:
                 )
                 cache.store_document(feature)
 
-                if ocr_engine is not None:
+                if ocr_engine is not None or use_gpu_mgr:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=True,
                         ocr_workers=config.OCR_WORKERS,
+                        gpu_manager=gpu_manager_client,
                     )
                     _aggregate_ocr_paragraphs(
                         doc_id, page_count, cache, extractor, text_processor,
@@ -264,11 +273,12 @@ def extract_single_worker(args: tuple) -> dict:
 
                 cache.store_document(feature)
 
-                if ocr_engine is not None:
+                if ocr_engine is not None or use_gpu_mgr:
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
                         config, ocr_engine, force=False,
                         ocr_workers=config.OCR_WORKERS,
+                        gpu_manager=gpu_manager_client,
                     )
 
         cache.conn.commit()

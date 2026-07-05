@@ -82,6 +82,10 @@ class BidDetectionOrchestrator:
         )
         self.image_matcher = ImageMatcher()
 
+        # GPU 资源管理器（多进程场景统一 GPU 访问，避免 OOM）
+        from pipeline.gpu_manager import GPUManager
+        self.gpu_manager = GPUManager(config)
+
         # 跨阶段缓存：避免重复从 SQLite 加载文档特征
         self._all_features_cache = None
 
@@ -168,6 +172,9 @@ class BidDetectionOrchestrator:
                     f"Phase 0 完成: {len(file_paths)} 个 PDF 文件"
                 )
 
+            # 启动 GPU Manager（Phase 1 OCR 需要）
+            self.gpu_manager.start()
+
             # === Phase 1: EXTRACT ===
             if state.phase < 2:
                 logger.info("Phase 1: 提取特征...")
@@ -218,12 +225,13 @@ class BidDetectionOrchestrator:
 
                         config_dict = self._get_picklable_config()
                         db_dir = self.config.CACHE_DIR
+                        gpu_client = self.gpu_manager.client
 
                         with ProcessPoolExecutor(max_workers=num_workers) as executor:
                             future_to_file = {
                                 executor.submit(
                                     extract_single_worker,
-                                    (fp, config_dict, db_dir)
+                                    (fp, config_dict, db_dir, gpu_client)
                                 ): fp
                                 for fp in unprocessed
                             }
@@ -479,6 +487,7 @@ class BidDetectionOrchestrator:
             raise
 
         finally:
+            self.gpu_manager.shutdown()
             self.streaming.clear()
             self.cache.close()
 
@@ -734,6 +743,16 @@ class BidDetectionOrchestrator:
         """
         if not self.config.ENABLE_OCR:
             return 0
+
+        # GPU Manager 路径：委托给 ocr_helpers.ocr_pages（统一实现）
+        if self.gpu_manager.enabled:
+            return ocr_pages(
+                file_path, doc_id, page_count,
+                self.cache, self.config, self.ocr_engine,
+                force=force, ocr_workers=self.config.OCR_WORKERS,
+                gpu_manager=self.gpu_manager.client,
+            )
+
         if not self.ocr_engine.is_available:
             logger.debug("OCR 引擎不可用，跳过图片文字提取")
             return 0

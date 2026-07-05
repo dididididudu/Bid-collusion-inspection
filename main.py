@@ -113,8 +113,9 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         if use_gpu:
             config.USE_GPU = True
+            config.GPU_MANAGER_ENABLED = True  # GPU 模式下自动启用统一管理
             config._auto_detect_device()  # 自动检测并设为 "cuda" / "mps" / "cpu"
-            logger.info(f"已启用 GPU 加速 (SBERT 设备: {config.SBERT_DEVICE})")
+            logger.info(f"已启用 GPU 加速 (SBERT: {config.SBERT_DEVICE}, GPU Manager: ON)")
         if no_checkpoint:
             config.ENABLE_CHECKPOINT = False
             logger.info("已禁用断点续传")
