@@ -63,6 +63,13 @@ models/
 *.pth
 *.ckpt
 
+# 输入数据（投标文件PDF等测试数据，大文件不应入仓）
+input/
+
+# 旧的缓存和检查点（运行产物，不应入仓）
+cache_old_*/
+checkpoints_old/
+
 # IDE配置
 .claude/
 
