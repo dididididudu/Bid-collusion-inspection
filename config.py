@@ -148,26 +148,26 @@ class DetectionConfig:
             env_home = os.environ.get('PADDLEOCR_HOME', '')
             if env_home:
                 self.PADDLEOCR_HOME = env_home
-                logger.info(f"从环境变量读取 PADDLEOCR_HOME={env_home}")
+                logger.debug(f"从环境变量读取 PADDLEOCR_HOME={env_home}")
 
         # OCR_MODEL_DIR: 如果 JSON 中未设置，从环境变量读取
         if self.OCR_MODEL_DIR is None:
             env_model = os.environ.get('OCR_MODEL_DIR', '')
             if env_model:
                 self.OCR_MODEL_DIR = env_model
-                logger.info(f"从环境变量读取 OCR_MODEL_DIR={env_model}")
+                logger.debug(f"从环境变量读取 OCR_MODEL_DIR={env_model}")
 
         # OCR_OFFLINE_MODE: 支持环境变量 OCR_OFFLINE=1 或 TRANSFORMERS_OFFLINE=1
         if not self.OCR_OFFLINE_MODE:
             if os.environ.get('OCR_OFFLINE', '') == '1':
                 self.OCR_OFFLINE_MODE = True
-                logger.info("从环境变量启用 OCR 离线模式 (OCR_OFFLINE=1)")
+                logger.debug("从环境变量启用 OCR 离线模式 (OCR_OFFLINE=1)")
 
         # 应用离线模式：设置 PaddleOCR 相关环境变量
         if self.OCR_OFFLINE_MODE:
             os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
             os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
-            logger.info("OCR 离线模式: 已禁用模型在线下载")
+            logger.debug("OCR 离线模式: 已禁用模型在线下载")
 
         # PADDLEOCR_HOME: 设置自定义缓存目录
         if self.PADDLEOCR_HOME:
@@ -179,16 +179,16 @@ class DetectionConfig:
             import torch
             if torch.cuda.is_available():
                 self.SBERT_DEVICE = "cuda"
-                logger.info("自动检测到 CUDA GPU，将使用 GPU 加速")
+                logger.debug("自动检测到 CUDA GPU，将使用 GPU 加速")
             elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 self.SBERT_DEVICE = "mps"
-                logger.info("自动检测到 Apple MPS，将使用 MPS 加速")
+                logger.debug("自动检测到 Apple MPS，将使用 MPS 加速")
             else:
                 self.SBERT_DEVICE = "cpu"
-                logger.info("未检测到 GPU，将使用 CPU")
+                logger.debug("未检测到 GPU，将使用 CPU")
         except ImportError:
             self.SBERT_DEVICE = "cpu"
-            logger.warning("torch 未安装，将使用 CPU")
+            logger.debug("torch 未安装，将使用 CPU")
 
     @classmethod
     def from_json(cls, config_path: str) -> 'DetectionConfig':

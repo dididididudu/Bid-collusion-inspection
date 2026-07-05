@@ -47,7 +47,7 @@ class DocumentCache:
         self._apply_pragmas(self.conn, _busy_ms)
 
         self._create_schema()
-        logger.info(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
+        logger.debug(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
 
     @staticmethod
     def _apply_pragmas(conn: sqlite3.Connection, busy_timeout: int = 30000) -> None:
@@ -1259,7 +1259,7 @@ class DocumentCache:
     def close(self) -> None:
         """关闭数据库连接"""
         self.conn.close()
-        logger.info("SQLite 缓存已关闭")
+        logger.debug("SQLite 缓存已关闭")
 
     def __enter__(self):
         return self

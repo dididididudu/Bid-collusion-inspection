@@ -332,7 +332,7 @@ class BidDetectionOrchestrator:
                                 completed_ids.add(pair_id)
                                 state.completed_pairs = len(completed_ids)
 
-                                if idx % 10 == 0 or idx == total_pending:
+                                if idx % 50 == 0 or idx == total_pending:
                                     logger.info(
                                         f"Phase 3 进度: {idx}/{total_pending} "
                                         f"({state.completed_pairs}/{state.total_pairs})"
@@ -395,7 +395,7 @@ class BidDetectionOrchestrator:
                                         exc_info=True,
                                     )
 
-                                if done_count % 10 == 0 or done_count == total_pending:
+                                if done_count % 50 == 0 or done_count == total_pending:
                                     logger.info(
                                         f"Phase 3 进度: {done_count}/{total_pending} "
                                         f"({len(completed_ids)}/{state.total_pairs})"
