@@ -190,54 +190,44 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
                 chunk_text = "\n".join(all_text_parts)
 
-                # 分词和段落分割
+                # 段落分割 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
                 paragraphs = self._split_paragraphs(chunk_text)
-
-                # 一次性对整块文本分词，simhash 和 minhash 共享分词结果
-                chunk_tokens = []
-                if chunk_text:
-                    chunk_tokens = [
-                        w for w in jieba.cut(chunk_text)
-                        if w not in self.stopwords and len(w) > 1
-                    ]
-
-                # 计算该块的 SimHash（使用预分词结果）
-                simhash = self._compute_simhash_from_tokens(chunk_tokens) if chunk_tokens else ""
-
-                # 预计算所有唯一词的 MinHash 值（跨段落共享）
-                word_hash_cache = {}
-                if chunk_tokens:
-                    unique_words = set(chunk_tokens)
-                    for w in unique_words:
-                        word_hash_cache[w] = [
-                            hash_func(w) for hash_func in self._minhash_funcs
-                        ]
-
-                # 计算段落的 MinHash（使用缓存词哈希）
                 paragraph_hashes = []
+                paragraph_tokens = []
+                chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
+
                 for para in paragraphs:
                     para_words = [
                         w for w in jieba.cut(para)
                         if w not in self.stopwords and len(w) > 1
                     ]
+                    paragraph_tokens.append(para_words)
+                    chunk_tokens.extend(para_words)
+
+                # 计算 SimHash
+                simhash = self._compute_simhash_from_tokens(chunk_tokens) if chunk_tokens else ""
+
+                # 预计算唯一词 MinHash 值（跨段落共享缓存）
+                word_hash_cache = {}
+                if chunk_tokens:
+                    for w in set(chunk_tokens):
+                        word_hash_cache[w] = [
+                            hash_func(w) for hash_func in self._minhash_funcs
+                        ]
+
+                for para_words in paragraph_tokens:
                     para_hash = self._compute_minhash_cached(para_words, word_hash_cache)
                     paragraph_hashes.append(para_hash)
 
                 # 提取报价
                 quotes = self._extract_quotes(chunk_text)
 
-                # 提取图片哈希（仅在 ENABLE_PAGE_IMAGE_HASHES 启用时）
-                # 纯文本 PDF 可禁用以大幅加速（跳过高成本的全页渲染和绘图检测）
-                if getattr(self.config, 'ENABLE_PAGE_IMAGE_HASHES', True):
-                    embedded_hashes = self._extract_embedded_images(
-                        doc, chunk_start, chunk_end
-                    )
-                    page_image_hashes = self._extract_page_image_hashes(
-                        doc, chunk_start, chunk_end
-                    )
-                    all_image_hashes = list(set(embedded_hashes + page_image_hashes))
-                else:
-                    all_image_hashes = []
+                # 提取嵌入图片哈希（logo/印章/图表，用于图片比对）
+                # _extract_embedded_images 内部已优化：纯文本页通过 get_image_info 预检跳过
+                embedded_hashes = self._extract_embedded_images(
+                    doc, chunk_start, chunk_end
+                )
+                all_image_hashes = list(set(embedded_hashes))
 
                 yield ChunkResult(
                     doc_id=doc_id,
@@ -247,6 +237,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     text=chunk_text,
                     paragraphs=paragraphs,
                     paragraph_hashes=paragraph_hashes,
+                    paragraph_tokens=paragraph_tokens,
                     simhash=simhash,
                     quotes=quotes,
                     image_hashes=all_image_hashes,
@@ -460,57 +451,6 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
             except Exception as e:
                 logger.debug(f"页面 {page_num} 图片提取失败: {e}")
-                continue
-
-        return hashes
-
-    def _extract_page_image_hashes(
-        self, doc, start_page: int, end_page: int
-    ) -> List[str]:
-        """提取页级图片的感知哈希（用于扫描版 PDF 的页面对比）
-
-        将每个页面渲染为图像，然后计算感知哈希。
-        使用采样策略：每 2 页取 1 页（对扫描版 PDF 足够检测相似度）。
-        渲染分辨率：200 DPI 缩放到 256x256 缩略图（快速哈希）。
-
-        Args:
-            doc: fitz.Document 对象
-            start_page: 起始页码（0-based）
-            end_page: 结束页码（0-based，不含）
-
-        Returns:
-            感知哈希字符串列表（格式: "page_{n}:{hash}"）
-        """
-        hashes = []
-        # 采样策略：每 2 页取 1 页，减少计算量
-        sample_step = 2
-
-        for page_num in range(start_page, min(end_page, doc.page_count), sample_step):
-            try:
-                page = doc[page_num]
-                # 渲染页面为图像（200 DPI，缩放到 256 像素宽）
-                pix = page.get_pixmap(dpi=150)
-                if pix is None:
-                    continue
-
-                # 转换为 PIL Image
-                img_data = pix.tobytes("rgb") if pix.n >= 3 else pix.tobytes("gray")
-                mode = "RGB" if pix.n >= 3 else "L"
-                img = Image.frombytes(mode, (pix.width, pix.height), img_data)
-
-                # 缩放到统一尺寸（256x256 左右，快速哈希）
-                img.thumbnail((256, 256), Image.LANCZOS)
-
-                # 计算多种哈希以提高鲁棒性
-                phash = imagehash.phash(img)
-                dhash = imagehash.dhash(img)
-
-                # 组合哈希：同时使用 pHash 和 dHash
-                hashes.append(f"page_{page_num}:p{phash}")
-                hashes.append(f"page_{page_num}:d{dhash}")
-
-            except Exception as e:
-                logger.debug(f"页面 {page_num} 渲染失败: {e}")
                 continue
 
         return hashes
