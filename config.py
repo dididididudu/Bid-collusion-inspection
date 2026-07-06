@@ -81,7 +81,7 @@ class DetectionConfig:
     TIME_BUCKET_FORMAT: str = "%Y-%m-%dT%H"
 
     # ── OCR ──
-    ENABLE_OCR: bool = False
+    ENABLE_OCR: bool = True
     OCR_ENGINE: str = "easyocr"
     OCR_LANGUAGES: list = None
     OCR_SAMPLE_STEP: int = 1
