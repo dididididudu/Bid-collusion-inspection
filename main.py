@@ -98,8 +98,7 @@ def _print_startup_diagnostics(config: DetectionConfig) -> None:
 
 def main(input_dir: str, output_dir: str, config_path: str = None,
          log_level: str = "INFO", use_gpu: bool = False,
-         no_checkpoint: bool = False, offline: bool = False,
-         no_images: bool = False) -> None:
+         no_checkpoint: bool = False, offline: bool = False) -> None:
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
 
@@ -124,10 +123,6 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
             os.environ['TRANSFORMERS_OFFLINE'] = '1'
             os.environ['HF_HUB_OFFLINE'] = '1'
             logger.info("已启用离线模式")
-        if no_images:
-            config.ENABLE_PAGE_IMAGE_HASHES = False
-            logger.info("已禁用图片哈希提取（跳过页级渲染）")
-
         # 打印启动诊断
         _print_startup_diagnostics(config)
 
@@ -239,13 +234,6 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        '--no-images',
-        action='store_true',
-        default=False,
-        help='跳过 PDF 页级图片哈希提取（纯文本 PDF 大幅加速 Phase 1）'
-    )
-
-    parser.add_argument(
         '--diagnose',
         action='store_true',
         default=False,
@@ -292,5 +280,4 @@ if __name__ == "__main__":
         use_gpu=args.gpu,
         no_checkpoint=args.no_checkpoint,
         offline=args.offline,
-        no_images=args.no_images,
     )
