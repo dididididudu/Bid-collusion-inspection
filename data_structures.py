@@ -100,6 +100,7 @@ class ChunkResult:
     text: str  # 块内完整文本
     paragraphs: List[str] = field(default_factory=list)
     paragraph_hashes: List[str] = field(default_factory=list)
+    paragraph_tokens: List[List[str]] = field(default_factory=list)
     simhash: str = ""
     quotes: List[float] = field(default_factory=list)
     image_hashes: List[str] = field(default_factory=list)
