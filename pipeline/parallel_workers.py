@@ -50,7 +50,8 @@ _build_metadata_evidence = build_metadata_evidence
 
 
 def _build_image_evidence(
-    doc_a: BidFeature, doc_b: BidFeature, cache
+    doc_a: BidFeature, doc_b: BidFeature, cache,
+    config: DetectionConfig = None,
 ) -> ImageEvidence:
     """构建增强图片证据 — 四层检测"""
     evidence = ImageEvidence()
@@ -96,12 +97,16 @@ def _build_image_evidence(
         ) for r in ocr_b
     ]
 
+    # 方案6：从配置读取模板哈希黑名单
+    boilerplate_hashes = set(config.IMAGE_BOILERPLATE_HASHES) if config and config.IMAGE_BOILERPLATE_HASHES else None
+
     matcher = ImageMatcher()
     match_result = matcher.analyze(
         hashes_a=hashes_a,
         hashes_b=hashes_b,
         ocr_results_a=ocr_objects_a if ocr_objects_a else None,
         ocr_results_b=ocr_objects_b if ocr_objects_b else None,
+        boilerplate_hashes=boilerplate_hashes,
     )
 
     evidence.exact_image_count = match_result.exact_image_count
@@ -442,7 +447,7 @@ def analyze_pair_worker(args: tuple) -> dict:
         if not doc_a.doc_minhash or not doc_b.doc_minhash:
             if doc_a.is_scanned or doc_b.is_scanned:
                 # 纯图片比对路径
-                image_evidence = _build_image_evidence(doc_a, doc_b, cache)
+                image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
                 metadata_evidence = _build_metadata_evidence(doc_a, doc_b)
 
                 evidence = EvidenceChain(
@@ -481,7 +486,7 @@ def analyze_pair_worker(args: tuple) -> dict:
             doc_a, doc_b, paragraph_matches, config
         )
         metadata_evidence = _build_metadata_evidence(doc_a, doc_b)
-        image_evidence = _build_image_evidence(doc_a, doc_b, cache)
+        image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
 
         evidence = EvidenceChain(
             text_evidence=text_evidence,

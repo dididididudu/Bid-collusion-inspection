@@ -24,22 +24,26 @@ logger = logging.getLogger(__name__)
 # ORB 特征匹配（全局共享，cv2 可能无 GPU 但特征匹配量很小）
 # ================================================================
 
-_ORB_DETECTOR = None
+_ORB_DETECTORS = {}
 
-def _get_orb():
-    """全局共享 ORB 检测器（延迟初始化）"""
-    global _ORB_DETECTOR
-    if _ORB_DETECTOR is None:
+def _get_orb(nfeatures=200):
+    """获取 ORB 检测器（按 nfeatures 分级缓存 — 方案4）
+
+    根据需要的特征点数缓存多个 ORB 实例，避免重复创建。
+    """
+    global _ORB_DETECTORS
+    if nfeatures not in _ORB_DETECTORS:
         try:
             import cv2
-            # nfeatures=200: 对 64x64 缩略图足够
             # scaleFactor=1.2: 金字塔尺度
             # fastThreshold=10: 降低阈值以在低纹理图上也能检测到关键点
-            _ORB_DETECTOR = cv2.ORB_create(nfeatures=200, scaleFactor=1.2, fastThreshold=10)
+            _ORB_DETECTORS[nfeatures] = cv2.ORB_create(
+                nfeatures=nfeatures, scaleFactor=1.2, fastThreshold=10
+            )
         except ImportError:
             logger.warning("OpenCV (cv2) 未安装，ORB 特征匹配不可用")
-            _ORB_DETECTOR = False
-    return _ORB_DETECTOR if _ORB_DETECTOR is not False else None
+            _ORB_DETECTORS[nfeatures] = False
+    return _ORB_DETECTORS[nfeatures] if _ORB_DETECTORS[nfeatures] is not False else None
 
 
 # ================================================================
@@ -85,6 +89,8 @@ class ImageSignature:
     def __post_init__(self):
         if self.raw_hashes is None:
             self.raw_hashes = []
+        # 方案5：直方图缓存初始化（lazy 计算）
+        self._histogram_cache = None
 
     @property
     def aspect_ratio(self) -> float:
@@ -101,8 +107,11 @@ class ImageSignature:
     def has_thumbnail(self) -> bool:
         return bool(self.thumbnail and len(self.thumbnail) > 100)
 
-    def get_orb_features(self):
+    def get_orb_features(self, nfeatures=None):
         """懒加载计算 ORB 特征
+
+        Args:
+            nfeatures: 期望的特征点数，None 表示使用默认值 200
 
         Returns:
             (keypoints, descriptors) or (None, None) if unavailable
@@ -112,7 +121,7 @@ class ImageSignature:
         if not self.has_thumbnail:
             return None, None
 
-        orb = _get_orb()
+        orb = _get_orb(nfeatures=nfeatures or 200)
         if orb is None:
             return None, None
 
@@ -131,13 +140,21 @@ class ImageSignature:
             return None, None
 
     def get_histogram(self) -> Optional[np.ndarray]:
-        """计算缩略图的归一化颜色直方图
+        """获取缩略图的归一化颜色直方图（缓存版 — 方案5）
 
+        第一次调用时计算并缓存，后续 O(1) 返回。
         Returns:
             shape (24,) 的 numpy 数组（RGB 各 8 bins）或 None
         """
+        if self._histogram_cache is not None:
+            return self._histogram_cache
         if not self.has_thumbnail:
             return None
+        self._histogram_cache = self._compute_histogram()
+        return self._histogram_cache
+
+    def _compute_histogram(self) -> Optional[np.ndarray]:
+        """计算缩略图的归一化颜色直方图"""
         try:
             img = Image.open(io.BytesIO(self.thumbnail)).convert('RGB')
             arr = np.array(img)  # (H, W, 3)
@@ -145,7 +162,6 @@ class ImageSignature:
             hist_g = np.histogram(arr[:, :, 1], bins=8, range=(0, 256))[0]
             hist_b = np.histogram(arr[:, :, 2], bins=8, range=(0, 256))[0]
             hist = np.concatenate([hist_r, hist_g, hist_b]).astype(np.float64)
-            # 归一化
             s = hist.sum()
             if s > 0:
                 hist /= s
@@ -391,6 +407,20 @@ class ImageHasher:
         if not verdict.l1_pass:
             return verdict
 
+        # 方案2a：L1 通过且距离极小（≤2）→ 跳过 L2/L3
+        max_l1_dist = max(
+            d for d in (verdict.phash_dist, verdict.dhash_dist, verdict.whash_dist)
+            if d >= 0
+        )
+        if max_l1_dist <= 2:
+            verdict.confidence = min(0.95, verdict.confidence + 0.2)
+            verdict.l2_pass = True
+            verdict.l3_pass = True
+            verdict.reasons.append(
+                f"L1 距离极小(max={max_l1_dist}) → 跳过 L2/L3"
+            )
+            return verdict
+
         if not (sig_a.has_thumbnail and sig_b.has_thumbnail):
             return verdict
 
@@ -464,8 +494,15 @@ class ImageHasher:
     ORB_MIN_MATCH_RATIO = 0.20
 
     def _verify_l2_orb(self, sig_a, sig_b, verdict):
-        kp_a, des_a = sig_a.get_orb_features()
-        kp_b, des_b = sig_b.get_orb_features()
+        # 方案4：根据 L1 置信度自适应调整 ORB 特征数
+        orb_nfeatures = 200
+        if verdict.confidence >= 0.7:
+            orb_nfeatures = 50   # 高度相似 → 轻量确认
+        elif verdict.confidence >= 0.4:
+            orb_nfeatures = 100  # 中等相似 → 适度确认
+
+        kp_a, des_a = sig_a.get_orb_features(nfeatures=orb_nfeatures)
+        kp_b, des_b = sig_b.get_orb_features(nfeatures=orb_nfeatures)
         if des_a is None or des_b is None:
             verdict.l2_pass = True
             return verdict
@@ -538,18 +575,72 @@ class ImageHasher:
         self,
         sigs_a: List[ImageSignature],
         sigs_b: List[ImageSignature],
+        max_matches: int = 0,
+        boilerplate_hashes: set = None,
     ) -> List[ImageMatchVerdict]:
-        """批量匹配两个文档的图片签名列表
+        """批量匹配两个文档的图片签名列表（方案1+2b+6 优化版）
 
-        返回所有满足阈值（confidence > 0）的匹配对。
+        方案1：哈希分桶预筛（40-bit pHash + 邻居桶），避免 O(n²) 暴力对比。
+        方案2b：max_matches 提前终止。
+        方案6：boilerplate_hashes 跳过已知模板哈希。
+
+        Args:
+            sigs_a: 文档 A 的图片签名列表
+            sigs_b: 文档 B 的图片签名列表
+            max_matches: >0 时找到此数量的匹配后提前终止
+            boilerplate_hashes: 已知模板哈希集合，匹配时跳过
+
+        Returns:
+            按置信度降序排列的匹配结果列表
         """
+        if not sigs_a or not sigs_b:
+            return []
+
+        # 方案6：过滤掉模板图
+        if boilerplate_hashes:
+            sigs_a = [s for s in sigs_a if s.phash not in boilerplate_hashes]
+            sigs_b = [s for s in sigs_b if s.phash not in boilerplate_hashes]
+            if not sigs_a or not sigs_b:
+                return []
+
+        # 方案1：哈希分桶预筛 — 2 hex 字符(8 bits)桶 + 比特翻转邻居
+        from collections import defaultdict
+        buckets = defaultdict(list)
+        for sig in sigs_b:
+            if sig.phash:
+                buckets[sig.phash[:2]].append(sig)
+
+        def neighbor_keys(key):
+            """生成主桶 + 邻居桶 key（单比特翻转，覆盖比特翻转导致的所有 hex 变化）
+
+            相比旧版 hex±1 邻居，本方法能覆盖更多情况：
+            - hex±1 只能覆盖某比特变化恰好使 hex 值 ±1 的单比特翻转（约 25% 情况）
+            - 比特翻转覆盖全部 4 种可能的单比特翻转（100% 情况）
+            """
+            keys = {key}
+            for i, ch in enumerate(key):
+                v = int(ch, 16)
+                for bit in range(4):
+                    nv = v ^ (1 << bit)
+                    keys.add(key[:i] + hex(nv)[2] + key[i+1:])
+            return keys
+
         results = []
         for sa in sigs_a:
-            if not sa.has_any_hash:
+            if not sa.phash:
                 continue
-            for sb in sigs_b:
-                if not sb.has_any_hash:
-                    continue
+
+            # 收集所有候选桶中的图片（用 dict 去重，避免 unhashable type 问题）
+            candidates = {}
+            for nk in neighbor_keys(sa.phash[:2]):
+                for sig in buckets.get(nk, []):
+                    candidates[id(sig)] = sig
+
+            for sb in candidates.values():
+                # 方案2b：提前终止
+                if max_matches > 0 and len(results) >= max_matches:
+                    break
+
                 verdict = self.compare_signatures(sa, sb)
                 if verdict.is_match and verdict.confidence > 0:
                     results.append(verdict)

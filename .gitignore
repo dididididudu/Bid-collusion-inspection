@@ -50,6 +50,7 @@ htmlcov/
 # 输出文件
 report/
 output/
+input1/
 results/
 
 # 配置文件（可能包含敏感信息）

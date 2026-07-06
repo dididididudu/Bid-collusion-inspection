@@ -65,8 +65,8 @@ class DetectionConfig:
     DB_BUSY_TIMEOUT: int = 120000
 
     # ── GPU / SBERT ──
-    USE_GPU: bool = True
-    SBERT_DEVICE: str = "gpu"
+    USE_GPU: bool = False
+    SBERT_DEVICE: str = "cpu"
     SBERT_BATCH_SIZE: int = 64
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
@@ -95,6 +95,8 @@ class DetectionConfig:
 
     # ── 图片 ──
     IMAGE_MIN_SIZE: int = 50
+    IMAGE_MAX_SIZE: int = 2000           # 超过此宽/高的图片等比缩放后再算哈希（方案6）
+    IMAGE_BOILERPLATE_HASHES: list = field(default_factory=list)  # 已知模板哈希黑名单（方案6）
     BID_BOILERPLATE_FILTER: bool = True
     BID_BOILERPLATE_WEIGHT: float = 0.3
 

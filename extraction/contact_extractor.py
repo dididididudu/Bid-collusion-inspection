@@ -18,15 +18,20 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 # 公司名称 — 匹配中文公司全称
+# 后缀必须包含"公司"或"集团"，去掉"管理""服务""信息"等通用词以避免假阳性
 _RE_COMPANY = re.compile(
-    r'(?:[一-龥()（）]{2,30}(?:有限公司|股份有限公司|有限责任公司|集团|科技|实业|建设|工程|贸易|投资|发展|管理|咨询|服务|设计|制造|电子|信息|网络|软件|数据|通信|建筑|安装|装饰|园林|市政|水利|电力|能源|化工|医药|食品|农业|物业|安保|物流|运输|旅游|酒店|餐饮|教育|医疗|文化|传媒|广告|金融|保险|证券|银行|租赁|房地产|置业|物业|控股))'
+    r'(?:[一-龥()（）]{2,30}(?:有限公司|股份有限公司|有限责任公司|'
+    r'集团有限公司|集团公司|控股有限公司|实业有限公司|集团))'
 )
 
 # 联系人姓名 — 匹配角色标注后的人名
+# 使用捕获组仅提取人名部分，去除"在""负"等尾部上下文
+# 注意：不含"项目经理"（易与"负责整体"等动词短语混淆）
 _RE_CONTACT_NAME = re.compile(
-    r'(?:联系人|项目负责人|法定代表人|授权代表|项目经理|技术负责人|投标人|'
-    r'委托代理人|被授权人|经办人|负责人|签字人|投标代表)'
-    r'[：:]\s*[一-龥]{2,4}'
+    r'(?:联系人|项目负责人|法定代表人|授权代表|技术负责人|投标人|'
+    r'委托代理人|被授权人|经办人|签字人|投标代表|'
+    r'技术总监|资深工程师)'
+    r'[：:]?\s*([一-龥]{2,4})'
 )
 
 # 手机号
@@ -94,6 +99,25 @@ class ContactFingerprint:
 # 提取函数
 # ============================================================
 
+# 常见跟在人名后的虚词/动词（人名尾部误捕获时切除）
+_CONTACT_NAME_TRAILING_TRIM = frozenset('的在是负有及与和这那了着负责整体项目进行')
+
+def _clean_contact_name(raw: str) -> str:
+    """清理捕获的人名：切除尾部虚词，保留有效人名部分
+
+    Args:
+        raw: 正则捕获组返回的原始字符串（如"张明远在""负责整体"）
+
+    Returns:
+        清理后的人名字符串（如"张明远"），无效返回空字符串
+    """
+    name = raw.strip()
+    while len(name) > 2 and name[-1] in _CONTACT_NAME_TRAILING_TRIM:
+        name = name[:-1]
+    # 至少保留 2 个汉字
+    return name if len(name) >= 2 and all('一' <= c <= '鿿' for c in name) else ''
+
+
 def extract_contacts_from_text(full_text: str) -> ContactFingerprint:
     """从文档全文提取联系人指纹
 
@@ -106,9 +130,15 @@ def extract_contacts_from_text(full_text: str) -> ContactFingerprint:
     if not full_text:
         return ContactFingerprint()
 
+    # 联系人名：正则带捕获组 → 清理尾部 → 去重
+    raw_names = _RE_CONTACT_NAME.findall(full_text)
+    cleaned_names = list(dict.fromkeys(
+        n for n in (_clean_contact_name(r) for r in raw_names) if n
+    ))
+
     return ContactFingerprint(
         company_names=list(set(_RE_COMPANY.findall(full_text))),
-        contact_names=list(set(_RE_CONTACT_NAME.findall(full_text))),
+        contact_names=cleaned_names,
         mobile_phones=list(set(_RE_MOBILE.findall(full_text))),
         landline_phones=list(set(_RE_PHONE.findall(full_text))),
         emails=list(set(_RE_EMAIL.findall(full_text))),

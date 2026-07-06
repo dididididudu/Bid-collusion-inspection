@@ -198,6 +198,8 @@ def ocr_pages(
     crop_tasks = []
     ocr_engine_type = getattr(config, 'OCR_ENGINE', 'easyocr')
     use_gpu = getattr(config, 'USE_GPU', False)
+    # 方案7：已见过的图片哈希去重，相同 pHash 只 OCR 一次
+    seen_hashes = set()
     try:
         for page_num in range(0, page_count, sample_step):
             try:
@@ -208,6 +210,9 @@ def ocr_pages(
                     pix = page.get_pixmap(dpi=150)
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
                     phash = str(imagehash.phash(img))
+                    if phash in seen_hashes:
+                        continue
+                    seen_hashes.add(phash)
                     crop_tasks.append((
                         np.array(img), phash, img.width, img.height,
                         min_conf, ocr_engine_type, use_gpu, page_num,
@@ -242,6 +247,9 @@ def ocr_pages(
                             if crop.size[0] < 10 or crop.size[1] < 10:
                                 continue
                             phash = str(imagehash.phash(crop))
+                            if phash in seen_hashes:
+                                continue
+                            seen_hashes.add(phash)
                             crop_tasks.append((
                                 np.array(crop), phash,
                                 crop.width, crop.height, min_conf,

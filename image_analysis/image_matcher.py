@@ -85,6 +85,8 @@ class ImageMatcher:
         ocr_results_b: List[OCRResult] = None,
         sigs_a: List[ImageSignature] = None,   # 预解析的签名列表
         sigs_b: List[ImageSignature] = None,
+        max_matches: int = 0,
+        boilerplate_hashes: set = None,
     ) -> ImageMatchResult:
         """执行四层图片对比分析
 
@@ -92,6 +94,8 @@ class ImageMatcher:
             hashes_a/b: 原始哈希字符串列表（用于旧版兼容）
             ocr_results_a/b: OCR 结果列表
             sigs_a/b: 预解析的图片签名（优先使用）
+            max_matches: >0 时找到此数量匹配后提前终止（方案2b）
+            boilerplate_hashes: 已知模板哈希黑名单，跳过这些图片（方案6）
         """
         result = ImageMatchResult()
 
@@ -149,7 +153,11 @@ class ImageMatcher:
                             sig.thumbnail = thumb
                             break
 
-        self._analyze_hash_layer_enhanced(sigs_a_used, sigs_b_used, result)
+        self._analyze_hash_layer_enhanced(
+            sigs_a_used, sigs_b_used, result,
+            max_matches=max_matches,
+            boilerplate_hashes=boilerplate_hashes,
+        )
 
         if not ocr_results_a or not ocr_results_b:
             self._compute_image_risk_score(result, sigs_a_used, sigs_b_used)
@@ -187,9 +195,15 @@ class ImageMatcher:
         sigs_a: List[ImageSignature],
         sigs_b: List[ImageSignature],
         result: ImageMatchResult,
+        max_matches: int = 0,
+        boilerplate_hashes: set = None,
     ):
         """L1: 多哈希共识匹配 — 要求多个哈希类型同时达标"""
-        verdicts = self.hasher.match_images(sigs_a, sigs_b)
+        verdicts = self.hasher.match_images(
+            sigs_a, sigs_b,
+            max_matches=max_matches,
+            boilerplate_hashes=boilerplate_hashes,
+        )
         result.image_verdicts = verdicts
 
         for v in verdicts:

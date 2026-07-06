@@ -1258,6 +1258,9 @@ class BidDetectionOrchestrator:
         """构建增强图片证据 — 四层检测（哈希 + OCR + 错字 + 文字相同）"""
         evidence = ImageEvidence()
 
+        # 方案6：模板哈希黑名单
+        boilerplate_hashes = set(self.config.IMAGE_BOILERPLATE_HASHES) if self.config.IMAGE_BOILERPLATE_HASHES else None
+
         # 保留原有的精确哈希匹配
         hashes_a = doc_a.image_hashes
         hashes_b = doc_b.image_hashes
@@ -1307,6 +1310,7 @@ class BidDetectionOrchestrator:
             hashes_b=hashes_b,
             ocr_results_a=ocr_objects_a if ocr_objects_a else None,
             ocr_results_b=ocr_objects_b if ocr_objects_b else None,
+            boilerplate_hashes=boilerplate_hashes,
         )
 
         # 填充增强字段

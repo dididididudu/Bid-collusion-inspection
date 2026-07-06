@@ -85,6 +85,7 @@ def build_image_evidence(
     file_path_a: str = None,
     file_path_b: str = None,
     output_dir: str = None,
+    config: DetectionConfig = None,
 ) -> ImageEvidence:
     """构建增强图片证据 — 四层检测（哈希 + OCR + 错字 + 文字相同）
 
@@ -95,6 +96,9 @@ def build_image_evidence(
 
     if image_matcher is None:
         image_matcher = ImageMatcher()
+
+    # 方案6：从配置读取模板哈希黑名单
+    boilerplate_hashes = set(config.IMAGE_BOILERPLATE_HASHES) if config and config.IMAGE_BOILERPLATE_HASHES else None
 
     # 精确哈希匹配
     hashes_a = doc_a.image_hashes
@@ -155,6 +159,7 @@ def build_image_evidence(
         hashes_b=hashes_b,
         ocr_results_a=ocr_objects_a if ocr_objects_a else None,
         ocr_results_b=ocr_objects_b if ocr_objects_b else None,
+        boilerplate_hashes=boilerplate_hashes,
     )
 
     # 填充增强字段
