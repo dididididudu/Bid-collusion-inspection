@@ -241,10 +241,24 @@ class PairwiseResult:
     doc_a_id: str
     doc_b_id: str
     similarity_scores: Dict[str, float] = field(default_factory=dict)
-    risk_level: str = "NONE"  # "NONE" | "LOW" | "MEDIUM" | "HIGH"
-    risk_score: int = 0  # 0-100 整数
+    risk_level: str = "NONE"
+    risk_score: int = 0
     risk_factors: List[str] = field(default_factory=list)
     evidence: EvidenceChain = field(default_factory=EvidenceChain)
+
+    def has_evidence(self) -> bool:
+        """是否有任何雷同项"""
+        e = self.evidence
+        return bool(
+            e.text_evidence.paragraph_matches or
+            e.metadata_evidence.matched_fields or
+            e.metadata_evidence.same_file_id or
+            e.image_evidence.common_image_count > 0 or
+            e.image_evidence.text_identical_count > 0 or
+            e.contact_evidence.common_companies or
+            e.contact_evidence.common_mobiles or
+            e.contact_evidence.common_member_ids
+        )
 
 
 @dataclass

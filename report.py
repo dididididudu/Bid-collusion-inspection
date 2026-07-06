@@ -174,6 +174,7 @@ class ReportGenerator:
 
         parts = []  # 使用列表收集片段，最后一次性 join
 
+        suspicious = sum(1 for r in results if r.has_evidence())
         parts.append(f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -191,10 +192,9 @@ body {{ font-family: 'Microsoft YaHei', '微软雅黑', sans-serif; background: 
 .stat-card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); flex: 1; min-width: 150px; text-align: center; }}
 .stat-card .number {{ font-size: 32px; font-weight: bold; color: #2c3e50; }}
 .stat-card .label {{ font-size: 13px; color: #7f8c8d; margin-top: 5px; }}
-.stat-card.high .number {{ color: #e74c3c; }}
+.stat-card.hit .number {{ color: #e74c3c; }}
 .result-card {{ background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }}
 .result-card h2 {{ font-size: 18px; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #ecf0f1; }}
-.risk-badge {{ display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; color: white; }}
 .match-item {{ background: #f8f9fa; padding: 15px; border-radius: 6px; margin: 10px 0; border-left: 4px solid #3498db; }}
 .match-item.clone {{ border-left-color: #e74c3c; }}
 .match-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px; }}
@@ -208,10 +208,6 @@ body {{ font-family: 'Microsoft YaHei', '微软雅黑', sans-serif; background: 
 .common-text .label {{ font-weight: bold; color: #2e7d32; font-size: 12px; }}
 summary {{ cursor: pointer; padding: 8px; background: #e3f2fd; border-radius: 4px; font-weight: bold; }}
 summary:hover {{ background: #bbdefb; }}
-.file-profiles {{ display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }}
-.file-profile {{ background: white; padding: 15px 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); flex: 1; min-width: 200px; }}
-.file-profile h3 {{ font-size: 15px; margin-bottom: 5px; }}
-.file-profile .risk {{ font-size: 14px; font-weight: bold; }}
 .footer {{ text-align: center; padding: 20px; color: #95a5a6; font-size: 13px; }}
 .dimension-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; margin: 12px 0; }}
 .dim-item {{ background: #f8f9fa; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #dee2e6; }}
@@ -232,29 +228,13 @@ summary:hover {{ background: #bbdefb; }}
 <div class="stats">
 <div class="stat-card"><div class="number">{report.total_files}</div><div class="label">检测文件数</div></div>
 <div class="stat-card"><div class="number">{report.total_pairs}</div><div class="label">比对总对数</div></div>
-<div class="stat-card"><div class="number">{report.suspicious_pairs}</div><div class="label">可疑对数</div></div>
-<div class="stat-card high"><div class="number">{report.high_risk_pairs}</div><div class="label">高风险对数</div></div>
+<div class="stat-card hit"><div class="number">{suspicious}</div><div class="label">有雷同项的对数</div></div>
 </div>
-
-<div class="file-profiles">
-<h2 style="width:100%;margin-bottom:10px;">📁 文件风险画像</h2>
 """)
 
-        for doc_id, profile in report.file_profiles.items():
-            risk_color = risk_colors.get(profile.max_risk_level, "#95a5a6")
-            risk_emoji = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡", "NONE": "🟢"}.get(profile.max_risk_level, "🟢")
-            parts.append(f"""
-<div class="file-profile">
-<h3>{profile.filename}</h3>
-<div class="risk" style="color:{risk_color};">{risk_emoji} {profile.max_risk_level}</div>
-<div style="font-size:13px;color:#7f8c8d;">关联可疑数: {profile.related_suspicious_count}</div>
-</div>""")
-
-        parts.append("</div>")
-
-        # === 相似文档对详情 ===
+        # === 雷同文档对详情 ===
         if results:
-            parts.append("<h2 style='margin-bottom:15px;'>🔍 相似文档对详情（完整相似内容）</h2>")
+            parts.append("<h2 style='margin-bottom:15px;'>🔍 雷同文档对详情</h2>")
 
             total_pairs = len(results)
             for i, result in enumerate(results, 1):
@@ -281,20 +261,23 @@ summary:hover {{ background: #bbdefb; }}
                     for d in dims
                 )
 
+                # 构建元数据和联系人证据 HTML
+                meta_html = self._build_metadata_evidence_html(evidence.metadata_evidence)
+                contact_html = self._build_contact_evidence_html(evidence.contact_evidence)
+
                 parts.append(f"""
 <div class="result-card">
 <h2>#{i} {filename_a} ↔ {filename_b}</h2>
 <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
-<div><strong>📊 文本相似度:</strong> <span style="font-size:18px;color:{risk_color};">{text_local:.4f}</span></div>
-<div><strong>📝 相似等级:</strong> {self._format_similarity(text_local)}</div>
-<div><strong>⚠ 风险评级:</strong> <span class="risk-badge" style="background:{risk_color};">{result.risk_level}</span></div>
+<div><strong>📊 文本相似度:</strong> <span style="font-size:18px;">{text_local:.4f}</span></div>
 <div><strong>🔗 相似段落:</strong> {len(para_matches)} 对</div>
 <div><strong>📎 克隆块:</strong> {len(clone_blocks)} 个</div>
-<div><strong>🎯 风险总分:</strong> {result.risk_score} 分</div>
 </div>
 <div class="dimension-grid">
 {dims_html}
-</div>""")
+</div>
+{meta_html}
+{contact_html}""")
 
                 # === 图片雷同证据（HTML） ===
                 self._append_image_evidence_html(parts, evidence.image_evidence)
@@ -364,6 +347,51 @@ summary:hover {{ background: #bbdefb; }}
 </body>
 </html>""")
 
+        return ''.join(parts)
+
+    @staticmethod
+    def _build_metadata_evidence_html(me) -> str:
+        """构建元数据雷同证据 HTML"""
+        parts = []
+        if me.matched_fields:
+            parts.append("<div class='section-title'>📋 元数据雷同</div>")
+            parts.append("<div style='margin:8px 0;font-size:13px;'>")
+            for f in me.matched_fields:
+                parts.append(f"<div style='padding:4px 8px;margin:2px 0;background:#e8f5e9;border-radius:4px;'>"
+                             f"✅ <strong>{f}</strong>: {me.matched_values.get(f, '')}</div>")
+            if me.same_time_bucket:
+                parts.append("<div style='padding:4px 8px;margin:2px 0;background:#e8f5e9;border-radius:4px;'>"
+                             "✅ 文件创建时间在同一小时</div>")
+            if me.same_file_id:
+                parts.append("<div style='padding:4px 8px;margin:2px 0;background:#ffebee;border-radius:4px;'>"
+                             "🔴 <strong>PDF文件码相同 — 两份文件从同一源文件生成</strong></div>")
+            parts.append("</div>")
+        return ''.join(parts)
+
+    @staticmethod
+    def _build_contact_evidence_html(ce) -> str:
+        """构建联系人雷同证据 HTML"""
+        parts = []
+        items = []
+        if ce.common_companies:
+            items.append(f"🏢 相同公司: {'、'.join(ce.common_companies)}")
+        if ce.common_contacts:
+            items.append(f"👤 相同联系人: {'、'.join(ce.common_contacts)}")
+        if ce.common_mobiles:
+            items.append(f"📱 相同手机: {'、'.join(ce.common_mobiles)}")
+        if ce.common_emails:
+            items.append(f"📧 相同邮箱: {'、'.join(ce.common_emails)}")
+        if ce.common_credit_codes:
+            items.append(f"🏛️ 相同信用代码: {'、'.join(ce.common_credit_codes)}")
+        if ce.common_member_ids:
+            items.append(f"🆔 相同会员号: {'、'.join(ce.common_member_ids)}")
+        if items:
+            parts.append("<div class='section-title'>📞 联系人/公司雷同</div>")
+            parts.append("<div style='margin:8px 0;font-size:13px;'>")
+            for item in items:
+                parts.append(f"<div style='padding:4px 8px;margin:2px 0;background:#fff3e0;border-radius:4px;'>"
+                             f"⚠️ {item}</div>")
+            parts.append("</div>")
         return ''.join(parts)
 
     @staticmethod
