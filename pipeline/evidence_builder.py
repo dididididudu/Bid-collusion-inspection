@@ -36,6 +36,9 @@ def build_metadata_evidence(doc_a: BidFeature, doc_b: BidFeature) -> MetadataEvi
         evidence.same_time_bucket = (
             doc_a.metadata.time_bucket == doc_b.metadata.time_bucket
         )
+    # 文件码对比：同一源文件 → 极强串标证据
+    if doc_a.metadata.file_id and doc_b.metadata.file_id:
+        evidence.same_file_id = (doc_a.metadata.file_id == doc_b.metadata.file_id)
     return evidence
 
 

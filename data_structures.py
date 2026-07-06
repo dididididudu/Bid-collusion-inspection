@@ -20,6 +20,7 @@ class MetadataFeature:
     modified_time: str = ""
     software_fingerprint: str = ""  # creator + producer 拼接归一化
     time_bucket: str = ""  # 创建时间按小时取整
+    file_id: str = ""  # PDF 文件唯一标识码（/ID[0]），同源文件相同→串标证据
 
 
 @dataclass
@@ -160,6 +161,7 @@ class MetadataEvidence:
     matched_fields: List[str] = field(default_factory=list)
     matched_values: Dict[str, str] = field(default_factory=dict)
     same_time_bucket: bool = False
+    same_file_id: bool = False  # PDF 文件码相同 → 从同一个文件派生
 
 
 @dataclass

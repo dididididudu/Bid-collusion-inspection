@@ -120,6 +120,18 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 except Exception:
                     pass
 
+            # 提取 PDF 文件唯一标识码（/ID[0]）
+            file_id = ""
+            try:
+                trailer = doc.pdf_trailer()
+                id_key = doc.xref_get_key(trailer, "ID")
+                if id_key and id_key[0] == 'array' and id_key[1]:
+                    # 格式: '[<ABC...> <DEF...>]'，取第一个
+                    parts = id_key[1].strip('[]').split()
+                    file_id = parts[0].strip('<>') if parts else ""
+            except Exception:
+                pass
+
             metadata = MetadataFeature(
                 author=author,
                 creator=creator,
@@ -128,6 +140,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 modified_time=modified_time,
                 software_fingerprint=software_fp,
                 time_bucket=time_bucket,
+                file_id=file_id,
             )
 
             page_count = doc.page_count
