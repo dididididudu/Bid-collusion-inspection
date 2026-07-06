@@ -42,9 +42,12 @@ class ParagraphMatcher:
 
         Returns matches sorted by similarity descending.
         """
-        # Load all paragraph MinHash signatures from SQLite
-        minhashes_a = cache.load_all_paragraph_minhashes(doc_a.doc_id)
-        minhashes_b = cache.load_all_paragraph_minhashes(doc_b.doc_id)
+        # 一次性加载全部段落数据（minhash + text + tokens + source）
+        para_full_a = cache.load_all_paragraphs_full(doc_a.doc_id)
+        para_full_b = cache.load_all_paragraphs_full(doc_b.doc_id)
+
+        minhashes_a = {k: v['minhash'] for k, v in para_full_a.items() if v['minhash']}
+        minhashes_b = {k: v['minhash'] for k, v in para_full_b.items() if v['minhash']}
 
         if not minhashes_a or not minhashes_b:
             logger.warning(
@@ -74,13 +77,11 @@ class ParagraphMatcher:
         if not stage1_candidates:
             return []
 
-        # 过滤跨类型候选对（OCR 段落只和 OCR 段落匹配，文本只和文本匹配）
-        source_a = cache.get_paragraph_source_map(doc_a.doc_id)
-        source_b = cache.get_paragraph_source_map(doc_b.doc_id)
+        # 过滤跨类型候选对（从 para_full 读取 source，无需额外查询）
         before = len(stage1_candidates)
         stage1_candidates = [
             (i, j, sim) for i, j, sim in stage1_candidates
-            if source_a.get(i, 'text') == source_b.get(j, 'text')
+            if para_full_a.get(i, {}).get('source', 'text') == para_full_b.get(j, {}).get('source', 'text')
         ]
         if before - len(stage1_candidates) > 0:
             logger.debug(
@@ -220,10 +221,11 @@ class ParagraphMatcher:
         for result in stage2_results:
             i = result['paragraph_a_index']
             j = result['paragraph_b_index']
+            # 从已加载的 para_full 获取（无 SQLite 查询）
             if not result.get('paragraph_a'):
-                result['paragraph_a'] = cache.load_paragraph_text(doc_a.doc_id, i) or ''
+                result['paragraph_a'] = para_full_a.get(i, {}).get('text', '')
             if not result.get('paragraph_b'):
-                result['paragraph_b'] = cache.load_paragraph_text(doc_b.doc_id, j) or ''
+                result['paragraph_b'] = para_full_b.get(j, {}).get('text', '')
 
         # === 标书模板语过滤：降低招标文件原文/通用模板语的权重 ===
         if getattr(self.config, 'BID_BOILERPLATE_FILTER', False):

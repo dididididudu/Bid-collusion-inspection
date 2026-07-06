@@ -394,6 +394,22 @@ class SemanticMatcher:
             doc_b_id, list(all_b_indices)
         ) if all_b_indices and doc_b_id else {}
 
+        # 构建对齐嵌入矩阵（向量化批量余弦相似度）
+        valid_pairs = []
+        for i, j, jaccard_sim in candidates:
+            ea, eb = embs_a.get(i), embs_b.get(j)
+            if ea is not None and eb is not None:
+                valid_pairs.append((i, j, jaccard_sim, ea, eb))
+
+        if not valid_pairs:
+            return []
+
+        emb_a_mat = np.stack([p[3] for p in valid_pairs])
+        emb_b_mat = np.stack([p[4] for p in valid_pairs])
+        na = np.linalg.norm(emb_a_mat, axis=1); na[na == 0] = 1.0
+        nb = np.linalg.norm(emb_b_mat, axis=1); nb[nb == 0] = 1.0
+        all_sims = np.sum(emb_a_mat * emb_b_mat, axis=1) / (na * nb)
+
         # 自适应阈值
         n_candidates = len(candidates)
         if n_candidates > 300:
@@ -404,18 +420,8 @@ class SemanticMatcher:
             base_threshold_adj = 0.0
 
         results = []
-        for i, j, jaccard_sim in candidates:
-            emb_a = embs_a.get(i)
-            emb_b = embs_b.get(j)
-            if emb_a is None or emb_b is None:
-                continue
-
-            # 向量化余弦相似度（纯 numpy 点积，极快）
-            norm_a = np.linalg.norm(emb_a)
-            norm_b = np.linalg.norm(emb_b)
-            if norm_a == 0 or norm_b == 0:
-                continue
-            sim = float(np.dot(emb_a, emb_b) / (norm_a * norm_b))
+        for idx, (i, j, jaccard_sim, _ea, _eb) in enumerate(valid_pairs):
+            sim = float(all_sims[idx])
 
             # 阈值判断
             text_a = para_texts_a[i]

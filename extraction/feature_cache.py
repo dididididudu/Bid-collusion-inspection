@@ -369,7 +369,11 @@ class DocumentCache:
             'time_bucket': doc.metadata.time_bucket,
         }, ensure_ascii=False)
 
-        with self.transaction() as conn:
+                _conn = conn if conn is not None else self.conn
+        _own_tx = conn is None
+        if _own_tx:
+            _conn.execute("BEGIN IMMEDIATE")
+        try:
             conn.execute("""
                 INSERT OR REPLACE INTO documents (
                     doc_id, filename, file_size, page_count, total_text_length,
@@ -505,8 +509,8 @@ class DocumentCache:
     # 文本块 CRUD
     # ================================================================
 
-    def store_chunk(self, chunk_result: ChunkResult) -> None:
-        """存储文本块（文本内容 zlib 压缩）"""
+    def store_chunk(self, chunk_result: ChunkResult, conn=None) -> None:
+        """存储文本块，conn 参数支持批量事务"""
         # 压缩文本内容
         text_bytes = chunk_result.text.encode('utf-8')
         compressed = zlib.compress(text_bytes, level=6)
@@ -637,6 +641,47 @@ class DocumentCache:
             (doc_id,)
         )
         return [row[0] for row in cursor.fetchall()]
+
+    
+    def load_all_paragraphs_full(self, doc_id: str) -> Dict[int, dict]:
+        """一次查询返回段落全部数据，替代 3 次独立查询"""
+        import json as _json
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, minhash, text, tokens, source, embedding "
+            "FROM paragraphs WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
+            "ORDER BY para_index", (doc_id,))
+        result = {}
+        for row in cursor.fetchall():
+            idx, mh, text, tokens_raw, source, emb_bytes = row
+            tokens = []
+            if tokens_raw:
+                try: tokens = _json.loads(tokens_raw)
+                except: pass
+            embedding = None
+            if emb_bytes:
+                try: embedding = np.frombuffer(emb_bytes, dtype=np.float32)
+                except: pass
+            result[idx] = {'minhash': mh or '', 'text': text or '',
+                           'tokens': tokens, 'source': source or 'text', 'embedding': embedding}
+        return result
+
+    def load_all_paragraphs_with_tokens(self, doc_id: str) -> Dict[int, dict]:
+        import json as _json
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT para_index, text, tokens FROM paragraphs WHERE doc_id = ? "
+            "AND text IS NOT NULL AND text != '' ORDER BY para_index", (doc_id,))
+        result = {}
+        for row in cursor.fetchall():
+            idx, text, tokens_raw = row
+            tokens = []
+            if tokens_raw:
+                try: tokens = _json.loads(tokens_raw)
+                except: pass
+            result[idx] = {'text': text, 'tokens': tokens}
+        return result
+
 
     def load_all_paragraph_minhashes(self, doc_id: str) -> Dict[int, str]:
         """加载文档所有段落的 MinHash 签名（用于分析阶段）"""
@@ -800,7 +845,7 @@ class DocumentCache:
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata_fingerprints "
             "(doc_id, author, creator, producer, software_fingerprint, time_bucket) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (doc_id, author, creator, producer, software_fingerprint, time_bucket)
         )
         self.conn.commit()

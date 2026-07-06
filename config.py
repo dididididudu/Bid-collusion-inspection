@@ -93,14 +93,14 @@ class DetectionConfig:
 
     # 并行处理
     PHASE1_WORKERS: int = 4       # Phase 1 提取并行度 (ProcessPoolExecutor)
-    PHASE3_WORKERS: int = 8       # Phase 3 分析并行度 (ThreadPoolExecutor)
-    DB_BUSY_TIMEOUT: int = 30000  # SQLite 写锁等待超时 (ms)
+    PHASE3_WORKERS: int = 4       # Phase 3 分析并行度 (ThreadPoolExecutor)
+    DB_BUSY_TIMEOUT: int = 120000  # SQLite 写锁等待超时 (ms)
 
     # 文档级向量预筛
     DOC_VECTOR_FILTER_ENABLED: bool = True
     DOC_VECTOR_THRESHOLD: float = 0.3  # 文档余弦相似度阈值
-    # 图片 OCR
-    ENABLE_OCR: bool = True              # 自动对页面图片运行 OCR
+    # 图片 OCR（默认关闭，扫描版 PDF 用 --ocr 开启）
+    ENABLE_OCR: bool = False             # 自动对页面图片运行 OCR
     OCR_ENGINE: str = "easyocr"          # OCR 引擎: "paddleocr" / "easyocr"
     OCR_LANGUAGES: list = None           # None = 默认 ['ch_sim', 'en']
     OCR_SAMPLE_STEP: int = 1             # 每隔 N 页运行一次 OCR（1 = 每页）
