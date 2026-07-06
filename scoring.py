@@ -78,6 +78,23 @@ class RiskScoringEngine:
             score += 40
             risk_factors.append("文件码相同: 两份PDF从同一源文件生成 (PDF /ID[0] 匹配)")
 
+        # 联系人/公司雷同 → 强串标证据
+        ce = evidence.contact_evidence
+        if ce.common_mobiles or ce.common_emails:
+            score += 30
+            risk_factors.append(
+                f"联系方式雷同: 手机{len(ce.common_mobiles)}个, 邮箱{len(ce.common_emails)}个"
+            )
+        if ce.common_companies:
+            score += 20
+            risk_factors.append(f"相同公司名: {ce.common_companies[:3]}")
+        if ce.common_contacts:
+            score += 20
+            risk_factors.append(f"相同联系人: {ce.common_contacts[:3]}")
+        if ce.common_credit_codes:
+            score += 35
+            risk_factors.append(f"统一社会信用代码相同: {ce.common_credit_codes}")
+
         text_local = scores.get('text_local', 0)
         paragraph_matches = evidence.text_evidence.paragraph_matches
         continuous_clone_blocks = evidence.text_evidence.continuous_clone_blocks

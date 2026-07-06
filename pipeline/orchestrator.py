@@ -41,6 +41,7 @@ from scoring import RiskScoringEngine
 from report import ReportGenerator
 from pipeline.evidence_builder import (
     build_metadata_evidence, build_image_evidence, build_text_evidence,
+    build_contact_evidence,
 )
 from pipeline.ocr_helpers import ocr_pages, aggregate_ocr_paragraphs
 
@@ -1193,10 +1194,15 @@ class BidDetectionOrchestrator:
         # 图片证据（增强版：四层检测）
         image_evidence = self._build_image_evidence(doc_a, doc_b)
 
+        contact_evidence = build_contact_evidence(
+            doc_a.doc_id, doc_b.doc_id, self.cache
+        )
+
         return EvidenceChain(
             text_evidence=text_evidence,
             metadata_evidence=metadata_evidence,
             image_evidence=image_evidence,
+            contact_evidence=contact_evidence,
         )
 
     @staticmethod

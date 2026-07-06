@@ -43,6 +43,36 @@ def build_metadata_evidence(doc_a: BidFeature, doc_b: BidFeature) -> MetadataEvi
 
 
 # ================================================================
+# 联系人/公司雷同证据
+# ================================================================
+
+def build_contact_evidence(
+    doc_a_id: str, doc_b_id: str, cache
+) -> 'ContactEvidence':
+    """对比两个文档的联系人/公司信息"""
+    from data_structures import ContactEvidence
+    evidence = ContactEvidence()
+
+    fp_a = cache.load_contact_fingerprint(doc_a_id)
+    fp_b = cache.load_contact_fingerprint(doc_b_id)
+    if not fp_a or not fp_b:
+        return evidence
+
+    for key, target in [('company_names', 'common_companies'),
+                         ('contact_names', 'common_contacts'),
+                         ('mobile_phones', 'common_mobiles'),
+                         ('emails', 'common_emails'),
+                         ('credit_codes', 'common_credit_codes')]:
+        set_a = set(fp_a.get(key, []))
+        set_b = set(fp_b.get(key, []))
+        common = list(set_a & set_b)
+        if common:
+            setattr(evidence, target, common)
+
+    return evidence
+
+
+# ================================================================
 # 图片证据（四层检测）
 # ================================================================
 

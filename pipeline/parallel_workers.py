@@ -294,6 +294,14 @@ def extract_single_worker(args: tuple) -> dict:
                         gpu_manager=gpu_manager_client,
                     )
 
+        # 提取联系人指纹（公司名/姓名/电话/邮箱）
+        try:
+            from extraction.contact_extractor import extract_contacts_from_sqlite
+            fp = extract_contacts_from_sqlite(doc_id, cache)
+            cache.store_contact_fingerprint(doc_id, fp.to_json())
+        except Exception:
+            pass
+
         cache.conn.commit()
         logger.info(f"[Worker] 完成: {filename}")
         return {"doc_id": doc_id, "filename": filename, "success": True}

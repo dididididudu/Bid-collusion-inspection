@@ -339,6 +339,16 @@ class DocumentCache:
             )
         """)
 
+        # 联系人指纹表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS contact_fingerprints (
+                doc_id TEXT PRIMARY KEY,
+                fingerprint_json TEXT DEFAULT '{}',
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+            )
+        """)
+
         # 管道状态表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pipeline_state (
@@ -868,6 +878,35 @@ class DocumentCache:
                 'time_bucket': row[5] or '',
             }
         return result
+
+    # ================================================================
+    # 联系人指纹 CRUD
+    # ================================================================
+
+    def store_contact_fingerprint(self, doc_id: str, fingerprint_json: str) -> None:
+        """存储文档的联系人指纹"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO contact_fingerprints (doc_id, fingerprint_json, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (doc_id, fingerprint_json)
+        )
+        self.conn.commit()
+
+    def load_contact_fingerprint(self, doc_id: str) -> dict:
+        """加载文档的联系人指纹 JSON"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT fingerprint_json FROM contact_fingerprints WHERE doc_id = ?",
+            (doc_id,)
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            import json
+            try:
+                return json.loads(row[0])
+            except Exception:
+                pass
+        return {}
 
     # ================================================================
     # 图片 OCR 结果 CRUD

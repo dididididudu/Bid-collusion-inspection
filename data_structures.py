@@ -211,11 +211,22 @@ class ImageEvidence:
 
 
 @dataclass
+class ContactEvidence:
+    """联系人/公司雷同证据"""
+    common_companies: List[str] = field(default_factory=list)     # 相同公司名
+    common_contacts: List[str] = field(default_factory=list)     # 相同联系人
+    common_mobiles: List[str] = field(default_factory=list)       # 相同手机号
+    common_emails: List[str] = field(default_factory=list)        # 相同邮箱
+    common_credit_codes: List[str] = field(default_factory=list)  # 相同统一社会信用代码
+
+
+@dataclass
 class EvidenceChain:
     """证据链"""
     text_evidence: TextEvidence = field(default_factory=TextEvidence)
     metadata_evidence: MetadataEvidence = field(default_factory=MetadataEvidence)
     image_evidence: ImageEvidence = field(default_factory=ImageEvidence)
+    contact_evidence: ContactEvidence = field(default_factory=ContactEvidence)
 
 
 # ============================================================
