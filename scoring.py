@@ -73,6 +73,11 @@ class RiskScoringEngine:
         score = 0
         risk_factors = []
 
+        # 文件码相同 → 极强串标证据（同一源文件直接派生）
+        if evidence.metadata_evidence.same_file_id:
+            score += 40
+            risk_factors.append("文件码相同: 两份PDF从同一源文件生成 (PDF /ID[0] 匹配)")
+
         text_local = scores.get('text_local', 0)
         paragraph_matches = evidence.text_evidence.paragraph_matches
         continuous_clone_blocks = evidence.text_evidence.continuous_clone_blocks
