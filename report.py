@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReportGenerator:
-    """报告生成器（改进版）"""
+    """报告生成器"""
 
     def __init__(self, config: DetectionConfig):
         self.config = config
@@ -74,6 +74,78 @@ class ReportGenerator:
             return "略有相似"
         else:
             return "基本不相似"
+
+    def _build_dimension_summary(self, result, evidence, fn_a: str, fn_b: str) -> list:
+        """构建 7 项检测维度总览"""
+        me = evidence.metadata_evidence
+        ce = evidence.contact_evidence
+        te = evidence.text_evidence
+        scores = result.similarity_scores
+
+        dims = []
+
+        # 1. 内容雷同
+        text_sim = scores.get('text_local', 0)
+        para_count = len(te.paragraph_matches)
+        clone_count = len(te.continuous_clone_blocks)
+        dims.append({
+            'name': '内容雷同', 'icon': '📝',
+            'hit': text_sim >= 0.3,
+            'detail': f'相似度 {text_sim:.2f}, {para_count} 对匹配段, {clone_count} 个克隆块',
+        })
+
+        # 2. 文件码雷同
+        dims.append({
+            'name': '文件码雷同', 'icon': '🔑',
+            'hit': me.same_file_id,
+            'detail': 'PDF /ID[0] 相同 — 两份文件从同一源文件生成',
+        })
+
+        # 3. 编辑经办人雷同 (creator/producer/software_fingerprint)
+        editor_fields = [f for f in ['creator', 'producer', 'software_fingerprint'] if f in me.matched_fields]
+        dims.append({
+            'name': '编辑经办人雷同', 'icon': '✏️',
+            'hit': len(editor_fields) > 0,
+            'detail': f'{", ".join(editor_fields)} 相同' if editor_fields else '',
+        })
+
+        # 4. 文档作者雷同
+        dims.append({
+            'name': '文档作者雷同', 'icon': '👤',
+            'hit': 'author' in me.matched_fields,
+            'detail': me.matched_values.get('author', '') if 'author' in me.matched_fields else '',
+        })
+
+        # 5. 同标段单位联系人雷同
+        contact_hits = []
+        if ce.common_mobiles:
+            contact_hits.append(f'手机 {",".join(ce.common_mobiles)}')
+        if ce.common_emails:
+            contact_hits.append(f'邮箱 {",".join(ce.common_emails)}')
+        if ce.common_contacts:
+            contact_hits.append(f'联系人 {"、".join(ce.common_contacts[:3])}')
+        dims.append({
+            'name': '单位联系人雷同', 'icon': '📞',
+            'hit': len(contact_hits) > 0,
+            'detail': '; '.join(contact_hits) if contact_hits else '',
+        })
+
+        # 6. 投标文件公司名称异常
+        company_hits = ce.common_companies
+        dims.append({
+            'name': '公司名称异常', 'icon': '🏢',
+            'hit': len(company_hits) > 0,
+            'detail': f'相同公司: {"、".join(company_hits[:3])}' if company_hits else '',
+        })
+
+        # 7. 会员号雷同（统一社会信用代码）
+        dims.append({
+            'name': '会员号雷同', 'icon': '🆔',
+            'hit': len(ce.common_credit_codes) > 0,
+            'detail': f'信用代码 {"、".join(ce.common_credit_codes)} 相同' if ce.common_credit_codes else '',
+        })
+
+        return dims
 
     def _generate_html_report(self, report: GlobalReport, output_dir: str) -> None:
         """生成HTML可视化报告 — 展示所有匹配证据，无过滤"""
@@ -134,6 +206,12 @@ summary:hover {{ background: #bbdefb; }}
 .file-profile h3 {{ font-size: 15px; margin-bottom: 5px; }}
 .file-profile .risk {{ font-size: 14px; font-weight: bold; }}
 .footer {{ text-align: center; padding: 20px; color: #95a5a6; font-size: 13px; }}
+.dimension-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; margin: 12px 0; }}
+.dim-item {{ background: #f8f9fa; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #dee2e6; }}
+.dim-item.dim-hit {{ background: #e8f5e9; border-left-color: #4caf50; }}
+.dim-icon {{ font-size: 18px; display: inline; margin-right: 6px; }}
+.dim-name {{ display: inline; font-weight: bold; font-size: 13px; color: #495057; }}
+.dim-value {{ margin-top: 4px; font-size: 12px; color: #666; }}
 .section-title {{ background: #2c3e50; color: white; padding: 8px 15px; border-radius: 4px; margin: 15px 0 10px 0; font-size: 15px; font-weight: bold; }}
 </style>
 </head>
@@ -185,6 +263,17 @@ summary:hover {{ background: #bbdefb; }}
                 para_matches = evidence.text_evidence.paragraph_matches
                 clone_blocks = evidence.text_evidence.continuous_clone_blocks
 
+                # === 检测维度总览 ===
+                dims = self._build_dimension_summary(result, evidence, filename_a, filename_b)
+                dims_html = ''.join(
+                    f'<div class="dim-item {"dim-hit" if d["hit"] else ""}">'
+                    f'<div class="dim-icon">{d["icon"]}</div>'
+                    f'<div class="dim-name">{d["name"]}</div>'
+                    f'<div class="dim-value">{"✅ " + d["detail"] if d["hit"] else "—"}</div>'
+                    f'</div>'
+                    for d in dims
+                )
+
                 parts.append(f"""
 <div class="result-card">
 <h2>#{i} {filename_a} ↔ {filename_b}</h2>
@@ -194,6 +283,10 @@ summary:hover {{ background: #bbdefb; }}
 <div><strong>⚠ 风险评级:</strong> <span class="risk-badge" style="background:{risk_color};">{result.risk_level}</span></div>
 <div><strong>🔗 相似段落:</strong> {len(para_matches)} 对</div>
 <div><strong>📎 克隆块:</strong> {len(clone_blocks)} 个</div>
+<div><strong>🎯 风险总分:</strong> {result.risk_score} 分</div>
+</div>
+<div class="dimension-grid">
+{dims_html}
 </div>""")
 
                 # === 图片雷同证据（HTML） ===
