@@ -58,12 +58,14 @@ class ContactFingerprint:
     landline_phones: List[str] = field(default_factory=list) # 固话
     emails: List[str] = field(default_factory=list)           # 邮箱
     credit_codes: List[str] = field(default_factory=list)    # 统一社会信用代码
+    member_ids: List[str] = field(default_factory=list)     # 会员号（外部 API 注入）
 
     def to_json(self) -> str:
         import json
         return json.dumps({
             'company_names': self.company_names,
             'contact_names': self.contact_names,
+            'member_ids': self.member_ids,
             'mobile_phones': self.mobile_phones,
             'landline_phones': self.landline_phones,
             'emails': self.emails,
@@ -84,6 +86,7 @@ class ContactFingerprint:
             landline_phones=d.get('landline_phones', []),
             emails=d.get('emails', []),
             credit_codes=d.get('credit_codes', []),
+            member_ids=d.get('member_ids', []),
         )
 
 

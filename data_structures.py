@@ -218,6 +218,7 @@ class ContactEvidence:
     common_mobiles: List[str] = field(default_factory=list)       # 相同手机号
     common_emails: List[str] = field(default_factory=list)        # 相同邮箱
     common_credit_codes: List[str] = field(default_factory=list)  # 相同统一社会信用代码
+    common_member_ids: List[str] = field(default_factory=list)   # 相同会员号（外部 API 注入）
 
 
 @dataclass

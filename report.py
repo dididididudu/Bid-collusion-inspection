@@ -138,11 +138,18 @@ class ReportGenerator:
             'detail': f'相同公司: {"、".join(company_hits[:3])}' if company_hits else '',
         })
 
-        # 7. 信用代码/会员号雷同
+        # 7. 信用代码雷同
         dims.append({
-            'name': '信用代码雷同', 'icon': '🆔',
+            'name': '信用代码雷同', 'icon': '🏛️',
             'hit': len(ce.common_credit_codes) > 0,
             'detail': f'{"、".join(ce.common_credit_codes[:3])} 相同' if ce.common_credit_codes else '',
+        })
+
+        # 8. 会员号雷同（外部 API 注入，当前为空）
+        dims.append({
+            'name': '会员号雷同', 'icon': '🆔',
+            'hit': len(ce.common_member_ids) > 0,
+            'detail': f'{"、".join(ce.common_member_ids[:3])} 相同' if ce.common_member_ids else '',
         })
 
         return dims

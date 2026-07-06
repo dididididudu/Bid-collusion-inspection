@@ -94,6 +94,9 @@ class RiskScoringEngine:
         if ce.common_credit_codes:
             score += 35
             risk_factors.append(f"统一社会信用代码相同: {ce.common_credit_codes}")
+        if ce.common_member_ids:
+            score += 40
+            risk_factors.append(f"会员号相同: {ce.common_member_ids}")
 
         text_local = scores.get('text_local', 0)
         paragraph_matches = evidence.text_evidence.paragraph_matches
