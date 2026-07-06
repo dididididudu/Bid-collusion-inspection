@@ -846,7 +846,7 @@ class DocumentCache:
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata_fingerprints "
             "(doc_id, author, creator, producer, software_fingerprint, time_bucket) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (doc_id, author, creator, producer, software_fingerprint, time_bucket)
         )
         self.conn.commit()
