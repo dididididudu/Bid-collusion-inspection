@@ -65,8 +65,8 @@ class DetectionConfig:
     DB_BUSY_TIMEOUT: int = 120000
 
     # ── GPU / SBERT ──
-    USE_GPU: bool = False
-    SBERT_DEVICE: str = "cpu"
+    USE_GPU: bool = True
+    SBERT_DEVICE: str = "gpu"
     SBERT_BATCH_SIZE: int = 64
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
