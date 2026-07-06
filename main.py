@@ -113,9 +113,8 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         if use_gpu:
             config.USE_GPU = True
-            config.GPU_MANAGER_ENABLED = True  # GPU 模式下自动启用统一管理
-            config._auto_detect_device()  # 自动检测并设为 "cuda" / "mps" / "cpu"
-            logger.info(f"已启用 GPU 加速 (SBERT: {config.SBERT_DEVICE}, GPU Manager: ON)")
+            config._auto_detect_device()
+            logger.info(f"已启用 GPU 加速 (SBERT 设备: {config.SBERT_DEVICE})")
         if no_checkpoint:
             config.ENABLE_CHECKPOINT = False
             logger.info("已禁用断点续传")
@@ -132,7 +131,7 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
         # 打印启动诊断
         _print_startup_diagnostics(config)
 
-        logger.info(f"配置加载完成: MAX_WORKERS={config.MAX_WORKERS}, CHECKPOINT_INTERVAL={config.CHECKPOINT_INTERVAL}")
+        logger.info(f"配置加载完成: Phase1={config.PHASE1_WORKERS}, Phase3={config.PHASE3_WORKERS}, OCR={config.ENABLE_OCR}")
 
         # 预加载 SBERT 模型（避免 Phase 1.5/3 中重复加载）
         logger.info("预加载 SBERT 模型...")
