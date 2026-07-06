@@ -375,6 +375,29 @@ def embed_single_worker(args: tuple) -> dict:
 # Phase 3 Worker: 单对分析 (ThreadPoolExecutor)
 # ================================================================
 
+# 线程本地缓存：同一线程内复用 SQLite 连接 + 文档数据，避免每对重复加载
+import threading as _threading
+_tls = _threading.local()
+
+
+def _get_thread_cache(db_dir, config):
+    """获取线程本地的 DocumentCache（每个线程只创建一次）"""
+    if not hasattr(_tls, 'cache'):
+        from extraction.feature_cache import DocumentCache
+        _tls.cache = DocumentCache(db_dir, config)
+        _tls.doc_cache = {}  # doc_id → BidFeature
+        _tls.matcher = None
+        _tls.scorer = None
+    return _tls.cache
+
+
+def _get_thread_doc(doc_id, cache):
+    """获取文档特征（线程本地缓存，避免重复 load_document）"""
+    if doc_id not in _tls.doc_cache:
+        _tls.doc_cache[doc_id] = cache.load_document(doc_id)
+    return _tls.doc_cache[doc_id]
+
+
 def analyze_pair_worker(args: tuple) -> dict:
     """Phase 3 worker: 分析一个候选文档对
 
@@ -391,25 +414,29 @@ def analyze_pair_worker(args: tuple) -> dict:
     config = DetectionConfig(**config_dict)
     cache = None
     try:
-        from extraction.feature_cache import DocumentCache
         from matching.paragraph_matcher import ParagraphMatcher
         from scoring import RiskScoringEngine
 
-        cache = DocumentCache(db_dir, config)
+        # 线程本地缓存：同一线程内复用连接+文档数据（每文档从 49 次加载 → 1 次）
+        cache = _get_thread_cache(db_dir, config)
+        doc_a = _get_thread_doc(doc_a_id, cache)
+        doc_b = _get_thread_doc(doc_b_id, cache)
 
-        doc_a = cache.load_document(doc_a_id)
-        doc_b = cache.load_document(doc_b_id)
         if not doc_a or not doc_b:
             cache.mark_pair_processed(doc_a_id, doc_b_id)
             cache.conn.commit()
             return {"pair_id": pair_id, "success": False,
                     "match_count": 0, "error": "Doc not found"}
 
-        matcher = ParagraphMatcher(config)
+        # 线程内复用 matcher 和 scorer
+        if _tls.matcher is None:
+            _tls.matcher = ParagraphMatcher(config)
+            _tls.scorer = RiskScoringEngine(config)
+        matcher = _tls.matcher
+        scorer = _tls.scorer
         if shared_matcher is not None:
-            # 复用主线程已加载的 SBERT 模型，避免每个 worker 重复加载
+            # 复用主线程已加载的 SBERT 模型
             matcher.semantic_matcher = shared_matcher
-        scorer = RiskScoringEngine(config)
 
         # 检查文字可用性
         if not doc_a.doc_minhash or not doc_b.doc_minhash:
