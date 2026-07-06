@@ -649,22 +649,18 @@ class DocumentCache:
         import json as _json
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT para_index, minhash, text, tokens, source, embedding "
+            "SELECT para_index, minhash, text, tokens, source "
             "FROM paragraphs WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
             "ORDER BY para_index", (doc_id,))
         result = {}
         for row in cursor.fetchall():
-            idx, mh, text, tokens_raw, source, emb_bytes = row
+            idx, mh, text, tokens_raw, source = row
             tokens = []
             if tokens_raw:
                 try: tokens = _json.loads(tokens_raw)
                 except: pass
-            embedding = None
-            if emb_bytes:
-                try: embedding = np.frombuffer(emb_bytes, dtype=np.float32)
-                except: pass
             result[idx] = {'minhash': mh or '', 'text': text or '',
-                           'tokens': tokens, 'source': source or 'text', 'embedding': embedding}
+                           'tokens': tokens, 'source': source or 'text'}
         return result
 
     def load_all_paragraphs_with_tokens(self, doc_id: str) -> Dict[int, dict]:

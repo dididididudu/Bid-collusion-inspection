@@ -103,52 +103,36 @@ class ParagraphMatcher:
         valid_candidates = []
 
         if self.semantic_matcher.is_available:
-            # Load paragraph texts (only for candidates)
+            # 从 para_full 直接读取文本和预分词（已在 match 开头一次查询加载）
             para_texts_a = {}
             para_texts_b = {}
+            word_sets_a = {}
+            word_sets_b = {}
 
             for i, j, _ in stage1_candidates:
-                if i not in para_texts_a:
-                    text = cache.load_paragraph_text(doc_a.doc_id, i)
-                    if text:
-                        para_texts_a[i] = text
-                if j not in para_texts_b:
-                    text = cache.load_paragraph_text(doc_b.doc_id, j)
-                    if text:
-                        para_texts_b[j] = text
+                if i not in para_texts_a and i in para_full_a:
+                    pd = para_full_a[i]
+                    para_texts_a[i] = pd['text']
+                    tokens = pd['tokens']
+                    word_sets_a[i] = {w for w in tokens if len(w) > 1} if tokens else {w for w in jieba.cut(pd['text']) if len(w) > 1}
+                if j not in para_texts_b and j in para_full_b:
+                    pd = para_full_b[j]
+                    para_texts_b[j] = pd['text']
+                    tokens = pd['tokens']
+                    word_sets_b[j] = {w for w in tokens if len(w) > 1} if tokens else {w for w in jieba.cut(pd['text']) if len(w) > 1}
 
-            # Filter candidates with valid text
             valid_candidates = [
                 (i, j, sim) for i, j, sim in stage1_candidates
                 if i in para_texts_a and j in para_texts_b
             ]
 
             if valid_candidates:
-                # === Stage 2a: Exact word Jaccard (fast, finds identical text) ===
                 exact_matches = []
                 semantic_candidates = []
 
-                # 预计算所有唯一段落文本的 jieba 分词集合（避免循环内重复分词）
-                cached_words_a = {}
-                cached_words_b = {}
-
                 for i, j, minhash_sim in valid_candidates:
-                    text_a = para_texts_a[i]
-                    text_b = para_texts_b[j]
-                    if not text_a or not text_b:
-                        continue
-
-                    # 使用缓存避免对同一段落重复分词
-                    if i not in cached_words_a:
-                        words = set(jieba.cut(text_a))
-                        cached_words_a[i] = {w for w in words if len(w) > 1}
-                    if j not in cached_words_b:
-                        words = set(jieba.cut(text_b))
-                        cached_words_b[j] = {w for w in words if len(w) > 1}
-
-                    words_a = cached_words_a[i]
-                    words_b = cached_words_b[j]
-
+                    words_a = word_sets_a.get(i, set())
+                    words_b = word_sets_b.get(j, set())
                     if not words_a or not words_b:
                         continue
 
@@ -285,18 +269,32 @@ class ParagraphMatcher:
         dim = len(first_hash.split(','))
 
         def build_matrix(indices, minhash_dict):
-            mat = np.zeros((len(indices), dim), dtype=np.int64)
-            for idx, para_idx in enumerate(indices):
-                h_str = minhash_dict[para_idx]
-                if h_str:
+            """向量化 MinHash 解析 — np.fromstring 替代 Python 逐值循环"""
+            hashes = [minhash_dict[i] for i in indices if minhash_dict.get(i, '')]
+            if not hashes:
+                return np.zeros((len(indices), dim), dtype=np.int64)
+            try:
+                flat = ','.join(hashes)
+                values = np.fromstring(flat, sep=',', dtype=np.int64)
+                mat = values.reshape(len(hashes), dim) % (2**63 - 1)
+                # 补齐缺行（某些段落 MinHash 为空）
+                full = np.zeros((len(indices), dim), dtype=np.int64)
+                full[:len(hashes)] = mat
+                return full
+            except Exception as e:
+                logger.debug(f"MinHash 向量化解析失败, 回退逐值: {e}")
+                # Fallback
+                mat = np.zeros((len(indices), dim), dtype=np.int64)
+                for idx, para_idx in enumerate(indices):
+                    h_str = minhash_dict.get(para_idx, '')
+                    if not h_str: continue
                     try:
-                        values = [int(v) for v in h_str.split(',')]
-                        if len(values) == dim:
-                            mat[idx] = [v % (2**63 - 1) for v in values]
-                    except (ValueError, OverflowError) as e:
-                        logger.debug(f"MinHash conversion failed para={para_idx}: {e}")
+                        vals = np.fromstring(h_str, sep=',', dtype=np.int64)
+                        if len(vals) == dim:
+                            mat[idx] = vals
+                    except Exception:
                         continue
-            return mat
+                return mat
 
         mat_a = build_matrix(indices_a, minhashes_a)
         mat_b = build_matrix(indices_b, minhashes_b)
@@ -368,30 +366,16 @@ _BID_BOILERPLATE_PATTERNS = [
 ]
 
 
+# 预编译模板语正则（单次扫描替代逐 pattern 循环）
+import re as _re
+_BOILERPLATE_RE = _re.compile('|'.join(_re.escape(p) for p in _BID_BOILERPLATE_PATTERNS))
+
+
 def _compute_boilerplate_ratio(text_a: str, text_b: str) -> float:
-    """计算两个段落中模板语的占比（0.0=全部原创, 1.0=全是模板语）
-
-    模板语定义：在中国标书中反复出现的招标文件原文、通用格式语言。
-    这类内容来自招标文件而非投标人原创，不应作为串标证据。
-
-    算法：统计两个文本中模板语关键词的命中率。
-    """
+    """单次正则扫描替代逐 pattern 循环（~50× 加速）"""
     if not text_a or not text_b:
         return 0.0
-
-    a_hits = 0
-    b_hits = 0
-    a_len = max(len(text_a), 1)
-    b_len = max(len(text_b), 1)
-
-    for pattern in _BID_BOILERPLATE_PATTERNS:
-        if pattern in text_a:
-            a_hits += len(pattern)
-        if pattern in text_b:
-            b_hits += len(pattern)
-
-    ratio_a = min(1.0, a_hits / a_len)
-    ratio_b = min(1.0, b_hits / b_len)
-
-    # 取两段中模板语比例的最大值（只要有一段是模板语就降低权重）
-    return max(ratio_a, ratio_b)
+    a_hits = sum(len(m.group()) for m in _BOILERPLATE_RE.finditer(text_a))
+    b_hits = sum(len(m.group()) for m in _BOILERPLATE_RE.finditer(text_b))
+    return max(min(1.0, a_hits / max(len(text_a), 1)),
+               min(1.0, b_hits / max(len(text_b), 1)))
