@@ -58,14 +58,23 @@ else
     log_warn "未检测到 NVIDIA GPU，将使用 CPU 模式"
 fi
 
-# pip 版本
-PIP_VERSION=$(pip --version 2>&1 | awk '{print $2}')
+# pip 检测（服务器可能只有 pip3）
+if command -v pip &> /dev/null; then
+    PIP=pip
+elif command -v pip3 &> /dev/null; then
+    PIP=pip3
+else
+    log_err "未找到 pip/pip3，请先安装: apt install python3-pip"
+    exit 1
+fi
+
+PIP_VERSION=$($PIP --version 2>&1 | awk '{print $2}' || echo "unknown")
 log_info "pip 版本: $PIP_VERSION"
 
 # 尝试用清华镜像加速
 log_info "配置 pip 镜像源..."
-pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple 2>/dev/null || true
-pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn 2>/dev/null || true
+$PIP config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple 2>/dev/null || true
+$PIP config set global.trusted-host pypi.tuna.tsinghua.edu.cn 2>/dev/null || true
 log_ok "pip 镜像源配置完成"
 
 echo ""
@@ -75,10 +84,10 @@ echo ""
 # ============================================================
 log_info "=== 2/9 安装基础依赖 ==="
 
-pip install numpy --quiet && log_ok "numpy 安装完成" || { log_warn "numpy 安装失败, 重试..."; pip install numpy --quiet && log_ok "numpy 重试成功" || log_err "numpy 重试也失败"; }
-pip install Pillow --quiet && log_ok "Pillow 安装完成" || { log_warn "Pillow 安装失败, 重试..."; pip install Pillow --quiet && log_ok "Pillow 重试成功" || log_err "Pillow 重试也失败"; }
-pip install scikit-learn --quiet && log_ok "scikit-learn 安装完成" || log_warn "scikit-learn 安装失败"
-pip install python-dateutil --quiet && log_ok "python-dateutil 安装完成" || log_warn "python-dateutil 安装失败"
+$PIP install numpy --quiet && log_ok "numpy 安装完成" || { log_warn "numpy 安装失败, 重试..."; $PIP install numpy --quiet && log_ok "numpy 重试成功" || log_err "numpy 重试也失败"; }
+$PIP install Pillow --quiet && log_ok "Pillow 安装完成" || { log_warn "Pillow 安装失败, 重试..."; $PIP install Pillow --quiet && log_ok "Pillow 重试成功" || log_err "Pillow 重试也失败"; }
+$PIP install scikit-learn --quiet && log_ok "scikit-learn 安装完成" || log_warn "scikit-learn 安装失败"
+$PIP install python-dateutil --quiet && log_ok "python-dateutil 安装完成" || log_warn "python-dateutil 安装失败"
 
 echo ""
 
@@ -87,7 +96,7 @@ echo ""
 # ============================================================
 log_info "=== 3/9 安装 PDF 解析引擎 ==="
 
-pip install PyMuPDF --quiet && log_ok "PyMuPDF (fitz) 安装完成" || log_warn "PyMuPDF 安装失败"
+$PIP install PyMuPDF --quiet && log_ok "PyMuPDF (fitz) 安装完成" || log_warn "PyMuPDF 安装失败"
 
 echo ""
 
@@ -96,7 +105,7 @@ echo ""
 # ============================================================
 log_info "=== 4/9 安装中文分词 ==="
 
-pip install jieba --quiet && log_ok "jieba 安装完成" || log_warn "jieba 安装失败"
+$PIP install jieba --quiet && log_ok "jieba 安装完成" || log_warn "jieba 安装失败"
 
 echo ""
 
@@ -105,8 +114,8 @@ echo ""
 # ============================================================
 log_info "=== 5/9 安装图片处理工具 ==="
 
-pip install imagehash --quiet && log_ok "imagehash 安装完成" || log_warn "imagehash 安装失败"
-pip install opencv-python-headless --quiet && log_ok "opencv-python 安装完成" || log_warn "opencv-python 安装失败"
+$PIP install imagehash --quiet && log_ok "imagehash 安装完成" || log_warn "imagehash 安装失败"
+$PIP install opencv-python-headless --quiet && log_ok "opencv-python 安装完成" || log_warn "opencv-python 安装失败"
 
 echo ""
 
@@ -115,8 +124,8 @@ echo ""
 # ============================================================
 log_info "=== 6/9 安装数据处理工具 ==="
 
-pip install networkx --quiet && log_ok "networkx 安装完成" || log_warn "networkx 安装失败"
-pip install datasketch --quiet && log_ok "datasketch 安装完成" || log_warn "datasketch 安装失败"
+$PIP install networkx --quiet && log_ok "networkx 安装完成" || log_warn "networkx 安装失败"
+$PIP install datasketch --quiet && log_ok "datasketch 安装完成" || log_warn "datasketch 安装失败"
 
 echo ""
 
@@ -135,20 +144,20 @@ if [ "$CUDA_AVAILABLE" = "1" ]; then
     log_info "检测 CUDA 版本..."
 
     log_info "安装 PyTorch 2.x (CUDA 12.1)..."
-    if pip install torch --index-url https://download.pytorch.org/whl/cu121 --quiet; then
+    if $PIP install torch --index-url https://download.pytorch.org/whl/cu121 --quiet; then
         log_ok "PyTorch (CUDA 12.1) 安装完成"
     else
         log_warn "CUDA 12.1 安装失败，尝试 CUDA 11.8..."
-        if pip install torch --index-url https://download.pytorch.org/whl/cu118 --quiet; then
+        if $PIP install torch --index-url https://download.pytorch.org/whl/cu118 --quiet; then
             log_ok "PyTorch (CUDA 11.8) 安装完成"
         else
             log_warn "GPU 版本安装失败，回退到 CPU 版本"
-            pip install torch --quiet || true
+            $PIP install torch --quiet || true
         fi
     fi
 else
     log_info "未检测到 GPU，安装 CPU 版 PyTorch"
-    pip install torch --quiet
+    $PIP install torch --quiet
 fi
 
 # 验证
@@ -164,8 +173,8 @@ echo ""
 # ============================================================
 log_info "=== 8/9 安装 SBERT 语义模型 ==="
 
-pip install transformers --quiet && log_ok "transformers 安装完成" || log_warn "transformers 安装失败"
-pip install sentence-transformers --quiet && log_ok "sentence-transformers 安装完成" || log_warn "sentence-transformers 安装失败"
+$PIP install transformers --quiet && log_ok "transformers 安装完成" || log_warn "transformers 安装失败"
+$PIP install sentence-transformers --quiet && log_ok "sentence-transformers 安装完成" || log_warn "sentence-transformers 安装失败"
 
 echo ""
 
@@ -176,7 +185,7 @@ log_info "=== 9/9 安装 OCR 引擎 ==="
 
 # 先装 EasyOCR（轻量、GPU 友好）
 export USE_TF=FALSE
-pip install easyocr --quiet && log_ok "easyocr 安装完成" || log_warn "easyocr 安装失败"
+$PIP install easyocr --quiet && log_ok "easyocr 安装完成" || log_warn "easyocr 安装失败"
 
 echo ""
 
