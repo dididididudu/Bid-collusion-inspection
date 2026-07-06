@@ -138,11 +138,11 @@ class ReportGenerator:
             'detail': f'相同公司: {"、".join(company_hits[:3])}' if company_hits else '',
         })
 
-        # 7. 会员号雷同（统一社会信用代码）
+        # 7. 信用代码/会员号雷同
         dims.append({
-            'name': '会员号雷同', 'icon': '🆔',
+            'name': '信用代码雷同', 'icon': '🆔',
             'hit': len(ce.common_credit_codes) > 0,
-            'detail': f'信用代码 {"、".join(ce.common_credit_codes)} 相同' if ce.common_credit_codes else '',
+            'detail': f'{"、".join(ce.common_credit_codes[:3])} 相同' if ce.common_credit_codes else '',
         })
 
         return dims
