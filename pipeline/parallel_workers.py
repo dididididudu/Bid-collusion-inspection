@@ -184,12 +184,18 @@ def extract_single_worker(args: tuple) -> dict:
             )
 
             chunks = []
-            for chunk_result in extractor.extract_chunks(
-                file_path, config.CHUNK_PAGE_SIZE, 0
-            ):
-                chunk_result.image_hashes = all_page_hashes
-                cache.store_chunk(chunk_result)
-                chunks.append(chunk_result)
+            cache.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for chunk_result in extractor.extract_chunks(
+                    file_path, config.CHUNK_PAGE_SIZE, 0
+                ):
+                    chunk_result.image_hashes = all_page_hashes
+                    cache.store_chunk(chunk_result, conn=cache.conn)
+                    chunks.append(chunk_result)
+                cache.conn.execute("COMMIT")
+            except Exception:
+                cache.conn.execute("ROLLBACK")
+                raise
 
             if chunks:
                 feature = text_processor.aggregate_chunks(
@@ -253,11 +259,18 @@ def extract_single_worker(args: tuple) -> dict:
             chunks = []
             chunk_size = config.CHUNK_PAGE_SIZE
 
-            for chunk_result in extractor.extract_chunks(
-                file_path, chunk_size, start_page
-            ):
-                cache.store_chunk(chunk_result)
-                chunks.append(chunk_result)
+            # 单事务批量写入（C+1 commit → 1 commit）
+            cache.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for chunk_result in extractor.extract_chunks(
+                    file_path, chunk_size, start_page
+                ):
+                    cache.store_chunk(chunk_result, conn=cache.conn)
+                    chunks.append(chunk_result)
+                cache.conn.execute("COMMIT")
+            except Exception:
+                cache.conn.execute("ROLLBACK")
+                raise
 
             if chunks:
                 feature = text_processor.aggregate_chunks(

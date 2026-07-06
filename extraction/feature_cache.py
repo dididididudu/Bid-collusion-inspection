@@ -284,6 +284,8 @@ class DocumentCache:
                 para_index INTEGER NOT NULL,
                 text TEXT,
                 minhash TEXT DEFAULT '',
+                tokens TEXT DEFAULT '',
+                source TEXT DEFAULT 'text',
                 FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
                 FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id),
                 UNIQUE(doc_id, para_index)
@@ -369,11 +371,7 @@ class DocumentCache:
             'time_bucket': doc.metadata.time_bucket,
         }, ensure_ascii=False)
 
-                _conn = conn if conn is not None else self.conn
-        _own_tx = conn is None
-        if _own_tx:
-            _conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self.transaction() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO documents (
                     doc_id, filename, file_size, page_count, total_text_length,
@@ -511,49 +509,52 @@ class DocumentCache:
 
     def store_chunk(self, chunk_result: ChunkResult, conn=None) -> None:
         """存储文本块，conn 参数支持批量事务"""
-        # 压缩文本内容
         text_bytes = chunk_result.text.encode('utf-8')
         compressed = zlib.compress(text_bytes, level=6)
-
         chunk_id = self._chunk_id(chunk_result.doc_id, chunk_result.chunk_index)
         paragraph_hashes_json = json.dumps(chunk_result.paragraph_hashes)
 
-        with self.transaction() as conn:
-            conn.execute("""
+        _conn = conn if conn is not None else self.conn
+        _own_tx = conn is None
+        if _own_tx:
+            _conn.execute("BEGIN IMMEDIATE")
+        try:
+            _conn.execute("""
                 INSERT OR REPLACE INTO chunks (
                     chunk_id, doc_id, chunk_index, start_page, end_page,
                     text_length, text_blob, simhash, paragraph_count, paragraph_hashes_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                chunk_id,
-                chunk_result.doc_id,
-                chunk_result.chunk_index,
-                chunk_result.start_page,
-                chunk_result.end_page,
+                chunk_id, chunk_result.doc_id, chunk_result.chunk_index,
+                chunk_result.start_page, chunk_result.end_page,
                 chunk_result.text_length if hasattr(chunk_result, 'text_length') else len(chunk_result.text),
-                compressed,
-                chunk_result.simhash,
-                len(chunk_result.paragraphs),
+                compressed, chunk_result.simhash, len(chunk_result.paragraphs),
                 paragraph_hashes_json,
             ))
 
-            # 批量存储段落数据（executemany 减少 Python-SQLite 往返）
             source = getattr(chunk_result, 'source', 'text')
+            para_tokens = getattr(chunk_result, 'paragraph_tokens', [])
+            import json as _json
             para_rows = [
-                (
-                    self._para_id(chunk_result.doc_id, para_idx),
-                    chunk_result.doc_id, chunk_id,
-                    para_idx, para_text, para_hash, source
-                )
+                (self._para_id(chunk_result.doc_id, para_idx),
+                 chunk_result.doc_id, chunk_id,
+                 para_idx, para_text, para_hash, source,
+                 _json.dumps(para_tokens[para_idx] if para_idx < len(para_tokens) else [], ensure_ascii=False))
                 for para_idx, (para_text, para_hash) in enumerate(
-                    zip(chunk_result.paragraphs, chunk_result.paragraph_hashes)
-                )
+                    zip(chunk_result.paragraphs, chunk_result.paragraph_hashes))
             ]
-            conn.executemany("""
+            _conn.executemany("""
                 INSERT OR REPLACE INTO paragraphs (
-                    para_id, doc_id, chunk_id, para_index, text, minhash, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    para_id, doc_id, chunk_id, para_index, text, minhash, source, tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, para_rows)
+
+            if _own_tx:
+                _conn.execute("COMMIT")
+        except Exception:
+            if _own_tx:
+                _conn.execute("ROLLBACK")
+            raise
 
     def load_chunk_text(self, doc_id: str, chunk_index: int) -> Optional[str]:
         """加载文本块的原始文本（解压缩）"""
