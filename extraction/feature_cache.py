@@ -1084,6 +1084,7 @@ class DocumentCache:
             'metadata_matched_fields': evidence.metadata_evidence.matched_fields,
             'metadata_matched_values': evidence.metadata_evidence.matched_values,
             'same_time_bucket': evidence.metadata_evidence.same_time_bucket,
+            'same_file_id': evidence.metadata_evidence.same_file_id,
             # 图片证据完整字段
             'image_common_hashes': ie.common_image_hashes,
             'image_exact_count': ie.exact_image_count,
@@ -1097,6 +1098,10 @@ class DocumentCache:
             'shared_typo_count': ie.shared_typo_count,
             'text_identical_count': ie.text_identical_count,
             'text_similar_count': ie.text_similar_count,
+            'ocr_results_a': [{k: v for k, v in r.items() if k != 'thumbnail'}
+                             for r in getattr(ie, 'ocr_results_a', []) or []],
+            'ocr_results_b': [{k: v for k, v in r.items() if k != 'thumbnail'}
+                             for r in getattr(ie, 'ocr_results_b', []) or []],
             'matched_image_pairs': ie.matched_image_pairs,
             'matched_text_pairs': ie.matched_text_pairs,
             'ps_detail_list': ie.ps_detail_list,
@@ -1104,6 +1109,13 @@ class DocumentCache:
             'detection_summary': text_ev.detection_summary,
             'common_paragraphs': text_ev.common_paragraphs[:10],
             'continuous_clone_blocks': text_ev.continuous_clone_blocks,
+            # 联系人证据
+            'contact_common_companies': evidence.contact_evidence.common_companies,
+            'contact_common_contacts': evidence.contact_evidence.common_contacts,
+            'contact_common_mobiles': evidence.contact_evidence.common_mobiles,
+            'contact_common_emails': evidence.contact_evidence.common_emails,
+            'contact_common_credit_codes': evidence.contact_evidence.common_credit_codes,
+            'contact_common_member_ids': evidence.contact_evidence.common_member_ids,
         }, ensure_ascii=False)
 
         with self.transaction() as conn:
@@ -1154,7 +1166,7 @@ class DocumentCache:
         """加载所有分析结果（含段落匹配+完整文本+高亮标记）"""
         from data_structures import (
             PairwiseResult, EvidenceChain, TextEvidence,
-            MetadataEvidence, ImageEvidence
+            MetadataEvidence, ImageEvidence, ContactEvidence
         )
 
         results = []
@@ -1216,6 +1228,7 @@ class DocumentCache:
                 matched_fields=evidence_raw.get('metadata_matched_fields', []),
                 matched_values=evidence_raw.get('metadata_matched_values', {}),
                 same_time_bucket=evidence_raw.get('same_time_bucket', False),
+                same_file_id=evidence_raw.get('same_file_id', False),
             )
 
             image_evidence = ImageEvidence(
@@ -1232,6 +1245,8 @@ class DocumentCache:
                 shared_typo_count=evidence_raw.get('shared_typo_count', 0),
                 text_identical_count=evidence_raw.get('text_identical_count', 0),
                 text_similar_count=evidence_raw.get('text_similar_count', 0),
+                ocr_results_a=evidence_raw.get('ocr_results_a', []),
+                ocr_results_b=evidence_raw.get('ocr_results_b', []),
                 matched_image_pairs=evidence_raw.get('matched_image_pairs', []),
                 matched_text_pairs=evidence_raw.get('matched_text_pairs', []),
                 ps_detail_list=evidence_raw.get('ps_detail_list', []),
@@ -1249,6 +1264,14 @@ class DocumentCache:
                     text_evidence=text_evidence,
                     metadata_evidence=metadata_evidence,
                     image_evidence=image_evidence,
+                    contact_evidence=ContactEvidence(
+                        common_companies=evidence_raw.get('contact_common_companies', []),
+                        common_contacts=evidence_raw.get('contact_common_contacts', []),
+                        common_mobiles=evidence_raw.get('contact_common_mobiles', []),
+                        common_emails=evidence_raw.get('contact_common_emails', []),
+                        common_credit_codes=evidence_raw.get('contact_common_credit_codes', []),
+                        common_member_ids=evidence_raw.get('contact_common_member_ids', []),
+                    ),
                 ),
             ))
 
