@@ -47,7 +47,7 @@ class ReportGenerator:
         logger.info(f"JSON报告已生成: {json_path}")
 
     def _dataclass_to_dict(self, obj: Any) -> Any:
-        """递归转换dataclass为字典"""
+        """递归转换dataclass为字典（bytes→base64）"""
         if hasattr(obj, '__dataclass_fields__'):
             result = {}
             for field_name, field_value in obj.__dict__.items():
@@ -57,6 +57,9 @@ class ReportGenerator:
             return [self._dataclass_to_dict(item) for item in obj]
         elif isinstance(obj, dict):
             return {k: self._dataclass_to_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, bytes):
+            import base64
+            return base64.b64encode(obj).decode('ascii')
         else:
             return obj
 
