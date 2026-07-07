@@ -338,6 +338,26 @@ def build_text_evidence(
                 match['highlighted_text_b'] = highlighted_b
                 match['common_parts'] = common_parts
 
+        # 方案一：低覆盖率匹配过滤
+        min_cov = config.MATCH_MIN_COVERAGE
+        if min_cov > 0:
+            filtered = []
+            for match in paragraph_matches:
+                parts = match.get('common_parts', [])
+                if not parts:
+                    filtered.append(match)
+                    continue
+                total_common = sum(len(p) for p in parts)
+                len_a = len(match.get('paragraph_a', ''))
+                len_b = len(match.get('paragraph_b', ''))
+                cov_a = total_common / max(len_a, 1)
+                cov_b = total_common / max(len_b, 1)
+                if cov_a < min_cov and cov_b < min_cov:
+                    continue
+                filtered.append(match)
+            paragraph_matches[:] = filtered
+            evidence.paragraph_matches = filtered
+
     return evidence
 
 
@@ -349,9 +369,14 @@ def _detect_clone_blocks(
     paragraph_matches: List[Dict],
     config: DetectionConfig,
 ) -> List[Dict]:
-    """检测连续克隆块"""
+    """检测连续克隆块
+
+    strict 模式（默认）：A 和 B 的段落索引都需要连续
+    loose 模式：仅 A 侧索引连续即可合并，适用"A拆多段、B合一段"的情况
+    """
     min_len = config.CLONE_BLOCK_MIN_LENGTH
     max_gap = config.CLONE_BLOCK_MAX_GAP
+    loose = getattr(config, 'CLONE_BLOCK_MERGE_MODE', 'strict') == 'loose'
 
     if len(paragraph_matches) < min_len:
         return []
@@ -373,11 +398,31 @@ def _detect_clone_blocks(
             a_gap = match['paragraph_a_index'] - last['paragraph_a_index'] - 1
             b_gap = match['paragraph_b_index'] - last['paragraph_b_index'] - 1
 
-            if a_gap <= max_gap and b_gap <= max_gap:
-                current_block.append(match)
+            if loose:
+                # loose: 仅 A 侧连续即合并，B 侧允许跳转
+                if a_gap <= max_gap:
+                    current_block.append(match)
+                else:
+                    if len(current_block) >= min_len:
+                        blocks.append({
+                            'group_id': f'clone_block_{group_id}',
+                            'pairs': [
+                                {'a_index': m['paragraph_a_index'],
+                                 'b_index': m['paragraph_b_index']}
+                                for m in current_block
+                            ],
+                            'similarity': sum(m['similarity'] for m in current_block) / len(current_block),
+                            'length': len(current_block),
+                        })
+                        group_id += 1
+                    current_block = [match]
             else:
-                if len(current_block) >= min_len:
-                    blocks.append({
+                # strict（默认）：A 和 B 都需要连续
+                if a_gap <= max_gap and b_gap <= max_gap:
+                    current_block.append(match)
+                else:
+                    if len(current_block) >= min_len:
+                        blocks.append({
                         'group_id': f'clone_block_{group_id}',
                         'pairs': [
                             {'a_index': m['paragraph_a_index'],

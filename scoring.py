@@ -34,7 +34,7 @@ class RiskScoringEngine:
         # 1. 对每个文档对进行风险评分
         scored_results = []
         for result in pairwise_results:
-            scored_result = self._score_pair(result)
+            scored_result = self._score_pair(result, enabled_dims=self.config.ENABLED_DIMENSIONS)
             scored_results.append(scored_result)
 
         # 2. 统计信息
@@ -65,36 +65,43 @@ class RiskScoringEngine:
         logger.info(f"报告生成完成: {len(suspicious_pairs)} 对可疑, {len(high_risk_pairs)} 对高风险")
         return report
 
-    def _score_pair(self, result: PairwiseResult) -> PairwiseResult:
-        """对单个文档对进行风险评分（优化版：增加覆盖率门限检查）"""
+    def _score_pair(self, result: PairwiseResult,
+                     enabled_dims: dict = None) -> PairwiseResult:
+        """对单个文档对进行风险评分（按 enabled_dims 门控）"""
         scores = result.similarity_scores
         evidence = result.evidence
+        if enabled_dims is None:
+            enabled_dims = {}
 
         score = 0
         risk_factors = []
 
-        # 文件码相同 → 极强串标证据（同一源文件直接派生）
-        if evidence.metadata_evidence.same_file_id:
+        # 文件码相同
+        if enabled_dims.get('file_id', True) and evidence.metadata_evidence.same_file_id:
             score += 40
             risk_factors.append("文件码相同: 两份PDF从同一源文件生成 (PDF /ID[0] 匹配)")
 
-        # 联系人/公司雷同 → 强串标证据
+        # 联系人/公司雷同
         ce = evidence.contact_evidence
-        if ce.common_mobiles or ce.common_emails:
-            score += 30
-            risk_factors.append(
-                f"联系方式雷同: 手机{len(ce.common_mobiles)}个, 邮箱{len(ce.common_emails)}个"
-            )
-        if ce.common_companies:
+        if enabled_dims.get('contact', True):
+            if ce.common_mobiles or ce.common_emails:
+                score += 30
+                risk_factors.append(
+                    f"联系方式雷同: 手机{len(ce.common_mobiles)}个, 邮箱{len(ce.common_emails)}个"
+                )
+            if ce.common_contacts:
+                score += 20
+                risk_factors.append(f"相同联系人: {ce.common_contacts[:3]}")
+
+        if enabled_dims.get('company_name', True) and ce.common_companies:
             score += 20
             risk_factors.append(f"相同公司名: {ce.common_companies[:3]}")
-        if ce.common_contacts:
-            score += 20
-            risk_factors.append(f"相同联系人: {ce.common_contacts[:3]}")
-        if ce.common_credit_codes:
+
+        if enabled_dims.get('credit_code', True) and ce.common_credit_codes:
             score += 35
             risk_factors.append(f"统一社会信用代码相同: {ce.common_credit_codes}")
-        if ce.common_member_ids:
+
+        if enabled_dims.get('member_id', True) and ce.common_member_ids:
             score += 40
             risk_factors.append(f"会员号相同: {ce.common_member_ids}")
 
@@ -108,16 +115,15 @@ class RiskScoringEngine:
         if match_count > 0:
             covered_a = len(set(m['paragraph_a_index'] for m in paragraph_matches))
             covered_b = len(set(m['paragraph_b_index'] for m in paragraph_matches))
-            # 改进覆盖率计算：使用实际可能的总段落数
             total_covered = covered_a + covered_b
-            coverage = min(1.0, total_covered / 50.0)  # 归一化到0-1
+            coverage = min(1.0, total_covered / 50.0)
 
         # 计算风险分数（文本 70 + 图片 30 = 0-100）
         max_para_sim = max((m['similarity'] for m in paragraph_matches), default=0)
         text_score = int(text_local * 60 + max_para_sim * 30 + coverage * 10)
         text_score = min(70, max(0, text_score))
 
-        # 图片维度评分（来自四层检测结果）
+        # 图片维度评分
         image_evidence = evidence.image_evidence
         image_score = min(30, image_evidence.image_risk_score)
 

@@ -1,0 +1,17 @@
+{
+  "_comment": "本地测试配置 — EasyOCR + CPU 离线模式",
+  "ENABLE_OCR": true,
+  "OCR_ENGINE": "easyocr",
+  "OCR_LANGUAGES": ["ch_sim", "en"],
+  "OCR_SAMPLE_STEP": 1,
+  "OCR_MIN_CONFIDENCE": 0.3,
+  "OCR_OFFLINE_MODE": true,
+  "OCR_RETRY_COUNT": 1,
+  "USE_GPU": false,
+  "SBERT_DEVICE": "cpu",
+  "SBERT_BATCH_SIZE": 64,
+  "PHASE1_WORKERS": 1,
+  "PHASE3_WORKERS": 1,
+  "MAX_WORKERS": 2,
+  "IMAGE_MIN_SIZE": 50
+}

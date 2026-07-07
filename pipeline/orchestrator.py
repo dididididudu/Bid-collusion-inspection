@@ -25,7 +25,7 @@ from concurrent.futures import (
 from config import DetectionConfig
 from data_structures import (
     BidFeature, GlobalReport, PairwiseResult, EvidenceChain,
-    TextEvidence, MetadataEvidence, ImageEvidence
+    TextEvidence, MetadataEvidence, ImageEvidence, ContactEvidence
 )
 from extraction.feature_cache import DocumentCache
 from extraction.pdf_extractor import PyMuPDFExtractor
@@ -268,7 +268,7 @@ class BidDetectionOrchestrator:
                 )
 
             # === Phase 1.5: EMBED (全局 SBERT 嵌入编码) ===
-            if state.phase < 3:
+            if state.phase < 3 and self.config.ENABLED_DIMENSIONS.get('content_similarity', True):
                 self._phase_embed(state)
 
             # Phase 1.5 完成后，将已加载的 SBERT 模型注入 Phase 3 的匹配器
@@ -1143,12 +1143,15 @@ class BidDetectionOrchestrator:
         self.streaming.activate_document(doc_b_id)
 
         try:
-            # 执行两阶段段落匹配
-            paragraph_matches = self.paragraph_matcher.match(
-                doc_a, doc_b, self.cache
-            )
+            # 执行两阶段段落匹配（仅在 content_similarity 启用时）
+            dims = self.config.ENABLED_DIMENSIONS
+            paragraph_matches = []
+            if dims.get('content_similarity', True):
+                paragraph_matches = self.paragraph_matcher.match(
+                    doc_a, doc_b, self.cache
+                )
 
-            # 构建证据链
+            # 构建证据链（按维度门控）
             evidence = self._build_evidence(doc_a, doc_b, paragraph_matches)
 
             # 构建分析结果
@@ -1165,7 +1168,7 @@ class BidDetectionOrchestrator:
             )
 
             # 风险评分
-            result = self.scoring_engine._score_pair(result)
+            result = self.scoring_engine._score_pair(result, enabled_dims=self.config.ENABLED_DIMENSIONS)
 
             # 存储结果
             self.cache.store_pairwise_result(result)
@@ -1182,21 +1185,27 @@ class BidDetectionOrchestrator:
         doc_b: BidFeature,
         paragraph_matches: List[Dict],
     ) -> EvidenceChain:
-        """构建证据链"""
-        # 文本证据
-        text_evidence = self._build_text_evidence(
-            doc_a, doc_b, paragraph_matches
-        )
+        """构建证据链（按 ENABLED_DIMENSIONS 门控）"""
+        dims = self.config.ENABLED_DIMENSIONS
+        cs = dims.get('content_similarity', True)
 
-        # 元数据证据
-        metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
+        text_evidence = TextEvidence()
+        if cs:
+            text_evidence = self._build_text_evidence(doc_a, doc_b, paragraph_matches)
 
-        # 图片证据（增强版：四层检测）
-        image_evidence = self._build_image_evidence(doc_a, doc_b)
+        metadata_evidence = MetadataEvidence()
+        if dims.get('file_id', True) or dims.get('author', True) or dims.get('editor', True):
+            metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
 
-        contact_evidence = build_contact_evidence(
-            doc_a.doc_id, doc_b.doc_id, self.cache
-        )
+        image_evidence = ImageEvidence()
+        if cs:
+            image_evidence = self._build_image_evidence(doc_a, doc_b)
+
+        contact_evidence = ContactEvidence()
+        if any(dims.get(k, True) for k in ['contact', 'company_name', 'credit_code', 'member_id']):
+            contact_evidence = build_contact_evidence(
+                doc_a.doc_id, doc_b.doc_id, self.cache
+            )
 
         return EvidenceChain(
             text_evidence=text_evidence,
@@ -1222,12 +1231,17 @@ class BidDetectionOrchestrator:
         和元数据匹配，文本证据留空。
         """
         pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+        dims = self.config.ENABLED_DIMENSIONS
 
-        # 图片证据（四层检测）
-        image_evidence = self._build_image_evidence(doc_a, doc_b)
+        # 图片证据（仅在 content_similarity 启用时）
+        image_evidence = ImageEvidence()
+        if dims.get('content_similarity', True):
+            image_evidence = self._build_image_evidence(doc_a, doc_b)
 
         # 元数据证据
-        metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
+        metadata_evidence = MetadataEvidence()
+        if dims.get('file_id', True) or dims.get('author', True) or dims.get('editor', True):
+            metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
 
         evidence = EvidenceChain(
             text_evidence=TextEvidence(),
@@ -1248,7 +1262,7 @@ class BidDetectionOrchestrator:
         )
 
         # 风险评分
-        result = self.scoring_engine._score_pair(result)
+        result = self.scoring_engine._score_pair(result, enabled_dims=self.config.ENABLED_DIMENSIONS)
         self.cache.store_pairwise_result(result)
         self.cache.mark_pair_processed(doc_a_id, doc_b_id)
 

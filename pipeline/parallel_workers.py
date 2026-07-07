@@ -466,7 +466,7 @@ def analyze_pair_worker(args: tuple) -> dict:
                     },
                     evidence=evidence,
                 )
-                result = scorer._score_pair(result)
+                result = scorer._score_pair(result, enabled_dims=config.ENABLED_DIMENSIONS)
                 cache.store_pairwise_result(result)
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
@@ -504,7 +504,7 @@ def analyze_pair_worker(args: tuple) -> dict:
             },
             evidence=evidence,
         )
-        result = scorer._score_pair(result)
+        result = scorer._score_pair(result, enabled_dims=config.ENABLED_DIMENSIONS)
         cache.store_pairwise_result(result)
         cache.mark_pair_processed(doc_a_id, doc_b_id)
         cache.conn.commit()

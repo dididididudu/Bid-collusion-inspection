@@ -29,6 +29,15 @@ class DetectionConfig:
     # ── 克隆块 ──
     CLONE_BLOCK_MIN_LENGTH: int = 2
     CLONE_BLOCK_MAX_GAP: int = 2
+    CLONE_BLOCK_MERGE_MODE: str = "strict"  # strict | loose（方案四）
+
+    # ── 匹配过滤 ──
+    MATCH_MIN_COVERAGE: float = 0.15  # 段落匹配最低公共文本覆盖率（方案一）
+
+    # ── 报告展示裁剪（方案二）──
+    REPORT_TRIM_THRESHOLD: float = 0.60
+    REPORT_TRIM_CONTEXT: int = 30
+    REPORT_CLONE_SUMMARY: bool = True     # 克隆块展示紧凑摘要
 
     # ── 风险等级 ──
     RISK_HIGH_THRESHOLD: int = 70
@@ -104,6 +113,19 @@ class DetectionConfig:
     REPORT_MAX_MATCHES_PER_PAIR: int = 10000
     REPORT_INCLUDE_ALL_MATCHES: bool = True
     REPORT_DETAIL_LEVEL: str = "full"
+
+    # ── 检测维度开关（前端可勾选）──
+    # content_similarity 控制文本+图片（重操作），其余轻量维度始终运行不消耗时间
+    ENABLED_DIMENSIONS: dict = field(default_factory=lambda: {
+        'content_similarity': True,  # 内容相似度（文本+图片）
+        'file_id': True,             # 文件码雷同
+        'author': True,              # 文档作者雷同
+        'editor': True,              # 编辑经办人雷同
+        'contact': True,             # 联系人雷同
+        'company_name': True,        # 公司名称异常
+        'credit_code': True,         # 信用代码雷同
+        'member_id': False,          # 会员号雷同（默认关闭）
+    })
 
     def __post_init__(self):
         if self.CHUNK_PAGE_SIZE < 10:

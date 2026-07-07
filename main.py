@@ -98,7 +98,8 @@ def _print_startup_diagnostics(config: DetectionConfig) -> None:
 
 def main(input_dir: str, output_dir: str, config_path: str = None,
          log_level: str = "INFO", use_gpu: bool = False,
-         no_checkpoint: bool = False, offline: bool = False) -> None:
+         no_checkpoint: bool = False, offline: bool = False,
+         dimensions: str = None) -> None:
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
 
@@ -123,6 +124,11 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
             os.environ['TRANSFORMERS_OFFLINE'] = '1'
             os.environ['HF_HUB_OFFLINE'] = '1'
             logger.info("已启用离线模式")
+        if dimensions:
+            enabled_list = [d.strip() for d in dimensions.split(',') if d.strip()]
+            for dim in config.ENABLED_DIMENSIONS:
+                config.ENABLED_DIMENSIONS[dim] = dim in enabled_list
+            logger.info(f"已限制检测维度: {enabled_list}")
         # 打印启动诊断
         _print_startup_diagnostics(config)
 
@@ -234,6 +240,13 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        '--dimensions',
+        type=str,
+        default=None,
+        help='启用的检测维度，逗号分隔，如: file_id,text,contact (默认全部启用)'
+    )
+
+    parser.add_argument(
         '--diagnose',
         action='store_true',
         default=False,
@@ -280,4 +293,5 @@ if __name__ == "__main__":
         use_gpu=args.gpu,
         no_checkpoint=args.no_checkpoint,
         offline=args.offline,
+        dimensions=args.dimensions,
     )

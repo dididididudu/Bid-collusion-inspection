@@ -1,0 +1,17 @@
+{
+  "phase": 6,
+  "completed_pairs": 1,
+  "total_pairs": 1,
+  "processed_files": [
+    "C:\\dongyuhang\\project\\Bid collusion inspection\\workdir\\422fffdd-0bce-42bc-be9a-c3e79abd7e73\\input\\技术方案_智能安防监控系统.pdf",
+    "C:\\dongyuhang\\project\\Bid collusion inspection\\workdir\\422fffdd-0bce-42bc-be9a-c3e79abd7e73\\input\\技术方案_智慧园区管理平台.pdf"
+  ],
+  "completed_pair_ids": [
+    "7480d7f18506102a::f8fc8e3e624c9214"
+  ],
+  "start_time": "2026-07-07T11:21:19.506423",
+  "config_hash": "90a81a0d3352",
+  "input_hash": "4492f2784d3db3d4b61480188ec6430b",
+  "version": 2,
+  "updated_at": "2026-07-07T11:21:26.355704"
+}

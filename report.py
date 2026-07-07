@@ -78,82 +78,85 @@ class ReportGenerator:
         else:
             return "基本不相似"
 
-    def _build_dimension_summary(self, result, evidence, fn_a: str, fn_b: str) -> list:
-        """构建 7 项检测维度总览"""
+    def _build_dimension_summary(self, result, evidence, fn_a: str, fn_b: str,
+                                  enabled_dims: dict = None) -> list:
+        """构建检测维度总览（按 enabled_dims 过滤）"""
         me = evidence.metadata_evidence
         ce = evidence.contact_evidence
         te = evidence.text_evidence
         scores = result.similarity_scores
+        if enabled_dims is None:
+            enabled_dims = {}
 
         dims = []
 
-        # 1. 内容雷同
-        text_sim = scores.get('text_local', 0)
-        para_count = len(te.paragraph_matches)
-        clone_count = len(te.continuous_clone_blocks)
-        dims.append({
-            'name': '内容雷同', 'icon': '📝',
-            'hit': text_sim >= 0.3,
-            'detail': f'相似度 {text_sim:.2f}, {para_count} 对匹配段, {clone_count} 个克隆块',
-        })
+        if enabled_dims.get('content_similarity', True):
+            text_sim = scores.get('text_local', 0)
+            para_count = len(te.paragraph_matches)
+            clone_count = len(te.continuous_clone_blocks)
+            dims.append({
+                'name': '内容（文本）雷同', 'icon': '📝',
+                'hit': text_sim >= 0.3,
+                'detail': f'相似度 {text_sim:.2f}, {para_count} 对匹配段, {clone_count} 个克隆块',
+            })
 
-        # 2. 文件码雷同
-        dims.append({
-            'name': '文件码雷同', 'icon': '🔑',
-            'hit': me.same_file_id,
-            'detail': 'PDF /ID[0] 相同 — 两份文件从同一源文件生成',
-        })
+        if enabled_dims.get('file_id', True):
+            dims.append({
+                'name': '文件码雷同', 'icon': '🔑',
+                'hit': me.same_file_id,
+                'detail': 'PDF /ID[0] 相同 — 两份文件从同一源文件生成',
+            })
 
-        # 3. 编辑经办人雷同 (creator/producer/software_fingerprint)
-        editor_fields = [f for f in ['creator', 'producer', 'software_fingerprint'] if f in me.matched_fields]
-        dims.append({
-            'name': '编辑经办人雷同', 'icon': '✏️',
-            'hit': len(editor_fields) > 0,
-            'detail': f'{", ".join(editor_fields)} 相同' if editor_fields else '',
-        })
+        if enabled_dims.get('editor', True):
+            editor_fields = [f for f in ['creator', 'producer', 'software_fingerprint'] if f in me.matched_fields]
+            dims.append({
+                'name': '编辑经办人雷同', 'icon': '✏️',
+                'hit': len(editor_fields) > 0,
+                'detail': f'{", ".join(editor_fields)} 相同' if editor_fields else '',
+            })
 
-        # 4. 文档作者雷同
-        dims.append({
-            'name': '文档作者雷同', 'icon': '👤',
-            'hit': 'author' in me.matched_fields,
-            'detail': me.matched_values.get('author', '') if 'author' in me.matched_fields else '',
-        })
+        if enabled_dims.get('author', True):
+            dims.append({
+                'name': '文档作者雷同', 'icon': '👤',
+                'hit': 'author' in me.matched_fields,
+                'detail': me.matched_values.get('author', '') if 'author' in me.matched_fields else '',
+            })
 
-        # 5. 同标段单位联系人雷同
-        contact_hits = []
-        if ce.common_mobiles:
-            contact_hits.append(f'手机 {",".join(ce.common_mobiles)}')
-        if ce.common_emails:
-            contact_hits.append(f'邮箱 {",".join(ce.common_emails)}')
-        if ce.common_contacts:
-            contact_hits.append(f'联系人 {"、".join(ce.common_contacts[:3])}')
-        dims.append({
-            'name': '单位联系人雷同', 'icon': '📞',
-            'hit': len(contact_hits) > 0,
-            'detail': '; '.join(contact_hits) if contact_hits else '',
-        })
+        if enabled_dims.get('contact', True):
+            contact_hits = []
+            if ce.common_mobiles:
+                contact_hits.append(f'手机 {",".join(ce.common_mobiles)}')
+            if ce.common_emails:
+                contact_hits.append(f'邮箱 {",".join(ce.common_emails)}')
+            if ce.common_contacts:
+                contact_hits.append(f'联系人 {"、".join(ce.common_contacts[:3])}')
+            dims.append({
+                'name': '单位联系人雷同', 'icon': '📞',
+                'hit': len(contact_hits) > 0,
+                'detail': '; '.join(contact_hits) if contact_hits else '',
+            })
 
-        # 6. 投标文件公司名称异常
-        company_hits = ce.common_companies
-        dims.append({
-            'name': '公司名称异常', 'icon': '🏢',
-            'hit': len(company_hits) > 0,
-            'detail': f'相同公司: {"、".join(company_hits[:3])}' if company_hits else '',
-        })
+        if enabled_dims.get('company_name', True):
+            company_hits = ce.common_companies
+            dims.append({
+                'name': '公司名称异常', 'icon': '🏢',
+                'hit': len(company_hits) > 0,
+                'detail': f'相同公司: {"、".join(company_hits[:3])}' if company_hits else '',
+            })
 
-        # 7. 信用代码雷同
-        dims.append({
-            'name': '信用代码雷同', 'icon': '🏛️',
-            'hit': len(ce.common_credit_codes) > 0,
-            'detail': f'{"、".join(ce.common_credit_codes[:3])} 相同' if ce.common_credit_codes else '',
-        })
+        if enabled_dims.get('credit_code', True):
+            dims.append({
+                'name': '信用代码雷同', 'icon': '🏛️',
+                'hit': len(ce.common_credit_codes) > 0,
+                'detail': f'{"、".join(ce.common_credit_codes[:3])} 相同' if ce.common_credit_codes else '',
+            })
 
-        # 8. 会员号雷同（外部 API 注入，当前为空）
-        dims.append({
-            'name': '会员号雷同', 'icon': '🆔',
-            'hit': len(ce.common_member_ids) > 0,
-            'detail': f'{"、".join(ce.common_member_ids[:3])} 相同' if ce.common_member_ids else '',
-        })
+        if enabled_dims.get('member_id', True):
+            dims.append({
+                'name': '会员号雷同', 'icon': '🆔',
+                'hit': len(ce.common_member_ids) > 0,
+                'detail': f'{"、".join(ce.common_member_ids[:3])} 相同' if ce.common_member_ids else '',
+            })
 
         return dims
 
@@ -254,7 +257,10 @@ summary:hover {{ background: #bbdefb; }}
                 clone_blocks = evidence.text_evidence.continuous_clone_blocks
 
                 # === 检测维度总览 ===
-                dims = self._build_dimension_summary(result, evidence, filename_a, filename_b)
+                dims = self._build_dimension_summary(
+                    result, evidence, filename_a, filename_b,
+                    enabled_dims=self.config.ENABLED_DIMENSIONS,
+                )
                 dims_html = ''.join(
                     f'<div class="dim-item {"dim-hit" if d["hit"] else ""}">'
                     f'<div class="dim-icon">{d["icon"]}</div>'
@@ -298,32 +304,43 @@ summary:hover {{ background: #bbdefb; }}
                     for pair in block.get('pairs', []):
                         clone_match_keys.add((pair['a_index'], pair['b_index']))
 
-                # === 连续克隆块展示 ===
+                # === 连续克隆块展示（方案三：摘要表格+折叠） ===
                 if clone_blocks:
                     parts.append("<div class='section-title'>⚠ 连续克隆块 — 连续雷同段落（最强围标证据）</div>")
 
+                    if self.config.REPORT_CLONE_SUMMARY:
+                        parts.append("""
+<style>
+.clone-table { width:100%; border-collapse:collapse; margin:8px 0; font-size:13px; }
+.clone-table th { background:#f4511e; color:#fff; padding:8px 10px; text-align:left; }
+.clone-table td { padding:8px 10px; border-bottom:1px solid #e0e0e0; background:#fff; }
+.clone-table tr:hover td { background:#fff3e0; }
+</style>
+<table class="clone-table">
+<tr><th>编号</th><th>段数</th><th>相似度</th><th>段落序列</th></tr>""")
+                        for block in clone_blocks:
+                            block_id = block.get('group_id', '?')
+                            block_len = block.get('length', 0)
+                            block_sim = block.get('similarity', 0)
+                            seq = ', '.join(f'A[{p["a_index"]}]↔B[{p["b_index"]}]' for p in block.get('pairs', []))
+                            parts.append(f"""<tr><td><strong>{block_id}</strong></td>
+<td><strong>{block_len}</strong></td><td>{block_sim:.4f}</td>
+<td style="font-size:12px;color:#666;">{seq}</td></tr>""")
+                        parts.append("</table>")
+
                     for block in clone_blocks:
                         block_id = block.get('group_id', '?')
-                        block_len = block.get('length', 0)
-                        block_sim = block.get('similarity', 0)
-                        block_pairs_keys = [
-                            (p['a_index'], p['b_index']) for p in block.get('pairs', [])
-                        ]
-                        block_matches = [
-                            m for m in sorted_matches
-                            if (m.get('paragraph_a_index'), m.get('paragraph_b_index')) in block_pairs_keys
-                        ]
+                        block_pairs_keys = [(p['a_index'], p['b_index']) for p in block.get('pairs', [])]
+                        block_matches = [m for m in sorted_matches if (m.get('paragraph_a_index'), m.get('paragraph_b_index')) in block_pairs_keys]
 
-                        parts.append(f"""
-<div class="clone-block">
-<strong>克隆块 [{block_id}]</strong> |
-连续 <strong>{block_len}</strong> 段雷同 |
-平均相似度: <strong>{block_sim:.4f}</strong><br>
-<strong>段落序列:</strong> {', '.join(f'A[{p["a_index"]}]↔B[{p["b_index"]}]' for p in block.get('pairs', []))}
-</div>""")
-
+                        parts.append(f"""<details style="margin:8px 0;">
+<summary style="cursor:pointer;padding:8px;background:#fff3e0;border-radius:4px;font-weight:bold;">
+📄 块 {block_id} — {len(block_matches)} 段 (平均相似度: {block.get('similarity',0):.4f})
+</summary>
+<div style="padding:4px 0;">""")
                         for bm in block_matches:
                             parts.append(self._build_match_html(bm, filename_a, filename_b, is_clone=True))
+                        parts.append("</div></details>")
 
                 # === 其他独立相似段落 ===
                 non_clone_matches = [
@@ -594,14 +611,21 @@ summary:hover {{ background: #bbdefb; }}
             for k, part in enumerate(common_parts, 1):
                 html += f"<div class='common-text'><span class='label'>[{k}]</span> {self._escape_html(part)}</div>"
 
-        # 高亮文本对比（完整输出，无截断）
+        # 高亮文本对比（方案二：非高亮部分过多时裁剪显示）
         highlighted_a = match.get('highlighted_text_a', '')
         highlighted_b = match.get('highlighted_text_b', '')
         para_a = match.get('paragraph_a', '')
         para_b = match.get('paragraph_b', '')
 
-        text_a_to_show = highlighted_a if highlighted_a else para_a
-        text_b_to_show = highlighted_b if highlighted_b else para_b
+        if highlighted_a:
+            text_a_to_show = self._trim_unmatched(highlighted_a, self.config.REPORT_TRIM_CONTEXT)
+        else:
+            text_a_to_show = para_a
+
+        if highlighted_b:
+            text_b_to_show = self._trim_unmatched(highlighted_b, self.config.REPORT_TRIM_CONTEXT)
+        else:
+            text_b_to_show = para_b
 
         if text_a_to_show or text_b_to_show:
             html += "<div class='text-compare'>"
@@ -629,6 +653,44 @@ summary:hover {{ background: #bbdefb; }}
 
     # 预编译正则，避免每次调用时重新编译
     _HL_RE = re.compile(r'【(.*?)】')
+
+    def _trim_unmatched(self, highlighted_text: str, context: int = 30) -> str:
+        """裁剪非高亮部分，仅保留匹配段落 + 前后上下文
+
+        如果非高亮文本占比超过阈值，则只保留每个高亮片段及其前后各 context 字，
+        长间隔用 ...〔中略 N 字〕... 代替。
+        """
+        segments = []
+        pos = 0
+        for m in self._HL_RE.finditer(highlighted_text):
+            start, end = m.start(), m.end()
+            if start > pos:
+                segments.append(('plain', highlighted_text[pos:start]))
+            segments.append(('highlight', m.group(1)))
+            pos = end
+        if pos < len(highlighted_text):
+            segments.append(('plain', highlighted_text[pos:]))
+
+        total_hl = sum(len(t) for _, t in segments if _ == 'highlight')
+        total_len = len(highlighted_text) - highlighted_text.count('【') - highlighted_text.count('】')
+        if total_len == 0 or total_hl / total_len >= 1 - self.config.REPORT_TRIM_THRESHOLD:
+            return highlighted_text  # 高亮占比足够高，不需要裁剪
+
+        result_parts = []
+        for _, (typ, txt) in enumerate(segments):
+            if typ == 'highlight':
+                result_parts.append(f'【{txt}】')
+            else:
+                stripped = txt.strip()
+                if len(stripped) <= context * 2 + 1:
+                    result_parts.append(stripped)
+                else:
+                    result_parts.append(stripped[:context])
+                    omitted = len(stripped) - context * 2
+                    result_parts.append(f'...〔中略 {omitted} 字〕...')
+                    result_parts.append(stripped[-context:])
+
+        return ''.join(result_parts)
 
     def _format_highlighted_html(self, text: str) -> str:
         """将【】标记的文本转换为HTML高亮格式"""
