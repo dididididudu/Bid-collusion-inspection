@@ -152,10 +152,11 @@ _COMMON_SURNAMES = frozenset(
 )
 
 # 招标/业主类关键词：出现在公司名前→表明是招标方而非投标方
+# 覆盖：招标公司、招标人、致：XX公司、业主单位等常见标书表述
 _TENDER_PREFIX_KEYWORDS = frozenset({
-    '招标人', '招标单位', '招标代理', '招标机构', '业主', '建设单位',
-    '采购人', '采购单位', '项目业主', '发包人', '委托方', '甲方',
-    '招标方', '项目招标人', '项目单位', '主管单位', '监督单位',
+    '招标人', '招标单位', '招标代理', '招标机构', '招标公司', '业主',
+    '建设单位', '采购人', '采购单位', '项目业主', '发包人', '委托方',
+    '甲方', '招标方', '项目招标人', '项目单位', '主管单位', '监督单位',
 })
 
 
@@ -180,7 +181,14 @@ def _is_tendering_entity(text: str, match_start: int) -> bool:
     if last_newline >= 0:
         before = before[last_newline + 1:]
     before_clean = before.replace(' ', '').replace('　', '').replace('：', ':')
-    return any(kw in before_clean for kw in _TENDER_PREFIX_KEYWORDS)
+    # 标准关键词匹配
+    if any(kw in before_clean for kw in _TENDER_PREFIX_KEYWORDS):
+        return True
+    # 致 [：: ] + 公司名 → 投标函抬头格式，表明是收件方（招标方）
+    import re
+    if re.search(r'致[：: \t]', before):
+        return True
+    return False
 
 
 def _clean_contact_name(raw: str) -> str:
