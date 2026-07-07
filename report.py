@@ -165,7 +165,15 @@ class ReportGenerator:
         html_path = os.path.join(output_dir, "detection_report.html")
 
         all_results = report.pairwise_results
-        all_results.sort(key=lambda x: x.risk_score, reverse=True)
+        # 按是否有证据排序（有证据的在前）
+        all_results.sort(key=lambda x: (x.has_evidence(), sum(
+            len(x.evidence.text_evidence.paragraph_matches),
+            x.evidence.image_evidence.common_image_count,
+            x.evidence.image_evidence.text_identical_count,
+            len(x.evidence.metadata_evidence.matched_fields),
+            len(x.evidence.contact_evidence.common_companies),
+            len(x.evidence.contact_evidence.common_mobiles),
+        )), reverse=True)
 
         html = self._build_html_content(report, all_results)
 
@@ -176,8 +184,6 @@ class ReportGenerator:
 
     def _build_html_content(self, report: GlobalReport, results: list) -> str:
         """构建HTML报告内容 — 使用 list+join 避免 O(n^2) 字符串拼接"""
-        risk_colors = {"HIGH": "#e74c3c", "MEDIUM": "#f39c12", "LOW": "#3498db", "NONE": "#95a5a6"}
-
         parts = []  # 使用列表收集片段，最后一次性 join
 
         suspicious = sum(1 for r in results if r.has_evidence())
@@ -248,7 +254,6 @@ summary:hover {{ background: #bbdefb; }}
                 profile_b = report.file_profiles.get(result.doc_b_id)
                 text_local = result.similarity_scores.get('text_local', 0)
                 evidence = result.evidence
-                risk_color = risk_colors.get(result.risk_level, "#95a5a6")
 
                 filename_a = profile_a.filename if profile_a else result.doc_a_id
                 filename_b = profile_b.filename if profile_b else result.doc_b_id
@@ -452,7 +457,6 @@ summary:hover {{ background: #bbdefb; }}
             parts.append(f"<p><strong>图片文字完全相同:</strong> {ie.text_identical_count} 对</p>")
         if getattr(ie, 'text_similar_count', 0) > 0:
             parts.append(f"<p><strong>图片文字高度相似:</strong> {ie.text_similar_count} 对</p>")
-        parts.append(f"<p><strong>图片风险分:</strong> {getattr(ie, 'image_risk_score', 0)}/30</p>")
 
         # === 逐对图片匹配详情 ===
         image_pairs = getattr(ie, 'matched_image_pairs', None) or []
@@ -591,6 +595,10 @@ summary:hover {{ background: #bbdefb; }}
         method = match.get('detection_method', '?')
         idx_a = match.get('paragraph_a_index', '?')
         idx_b = match.get('paragraph_b_index', '?')
+        page_a = match.get('page_num_a', -1)
+        page_b = match.get('page_num_b', -1)
+        page_str_a = f" 第{page_a + 1}页" if page_a >= 0 else ""
+        page_str_b = f" 第{page_b + 1}页" if page_b >= 0 else ""
         clone_class = " clone" if is_clone else ""
         clone_label = " [连续克隆]" if is_clone else ""
 
@@ -600,7 +608,7 @@ summary:hover {{ background: #bbdefb; }}
 <span class="match-sim">相似度: {sim:.4f}</span>
 <span style="font-size:13px;color:#7f8c8d;">方法: {method}{clone_label}</span>
 <span style="font-size:12px;color:#95a5a6;">
-  A[{filename_a}] 第[{idx_a}]段 ↔ B[{filename_b}] 第[{idx_b}]段
+  A[{filename_a}] 第[{idx_a}]段{page_str_a} ↔ B[{filename_b}] 第[{idx_b}]段{page_str_b}
 </span>
 </div>"""
 
@@ -631,12 +639,12 @@ summary:hover {{ background: #bbdefb; }}
             html += "<div class='text-compare'>"
             if text_a_to_show:
                 html += f"""<div class='text-col'>
-<h4>📄 文档A — {filename_a} 第[{idx_a}]段</h4>
+<h4>📄 文档A — {filename_a} 第[{idx_a}]段{page_str_a}</h4>
 {self._format_highlighted_html(text_a_to_show)}
 </div>"""
             if text_b_to_show:
                 html += f"""<div class='text-col'>
-<h4>📄 文档B — {filename_b} 第[{idx_b}]段</h4>
+<h4>📄 文档B — {filename_b} 第[{idx_b}]段{page_str_b}</h4>
 {self._format_highlighted_html(text_b_to_show)}
 </div>"""
             html += "</div>"

@@ -53,11 +53,23 @@ def setup_logging(log_level: str = "INFO") -> None:
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(file_handler)
     
-    logging.getLogger('pdfminer').setLevel(logging.WARNING)
-    logging.getLogger('transformers').setLevel(logging.WARNING)
-    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
-    logging.getLogger('sklearn').setLevel(logging.WARNING)
-    logging.getLogger('PIL').setLevel(logging.WARNING)
+    # 静默第三方库的 INFO/DEBUG 日志
+    for _lib in ['pdfminer', 'transformers', 'sentence_transformers', 'sklearn',
+                 'PIL', 'jieba', 'paddleocr', 'paddle', 'paddlex',
+                 'easyocr', 'torch', 'cv2', 'matplotlib', 'urllib3',
+                 'PIL.PngImagePlugin', 'PIL.TiffImagePlugin']:
+        logging.getLogger(_lib).setLevel(logging.WARNING)
+    # 管道内部模块日志较细，默认只显示 WARNING 以上
+    for _mod in ['pipeline.checkpoint', 'pipeline.streaming_context',
+                 'pipeline.parallel_workers', 'pipeline.ocr_helpers',
+                 'extraction.pdf_extractor', 'extraction.feature_cache',
+                 'extraction.text_processor', 'matching.paragraph_matcher',
+                 'matching.semantic_matcher', 'matching.lsh_index',
+                 'matching.selector', 'embedding.embedding_engine',
+                 'image_analysis.image_hasher', 'image_analysis.image_matcher',
+                 'image_analysis.image_ocr']:
+        logging.getLogger(_mod).setLevel(logging.WARNING)
+    # orchestrator 和 scoring 保留 INFO（阶段进度和风险结果）
     
     logging.info(f"日志系统已初始化: 级别={log_level}, 最大文件大小=10MB, 保留备份=3个")
 

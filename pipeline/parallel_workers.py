@@ -392,7 +392,6 @@ def _get_thread_cache(db_dir, config):
         _tls.cache = DocumentCache(db_dir, config)
         _tls.doc_cache = {}  # doc_id → BidFeature
         _tls.matcher = None
-        _tls.scorer = None
     return _tls.cache
 
 
@@ -420,7 +419,6 @@ def analyze_pair_worker(args: tuple) -> dict:
     cache = None
     try:
         from matching.paragraph_matcher import ParagraphMatcher
-        from scoring import RiskScoringEngine
 
         # 线程本地缓存：同一线程内复用连接+文档数据（每文档从 49 次加载 → 1 次）
         cache = _get_thread_cache(db_dir, config)
@@ -433,12 +431,10 @@ def analyze_pair_worker(args: tuple) -> dict:
             return {"pair_id": pair_id, "success": False,
                     "match_count": 0, "error": "Doc not found"}
 
-        # 线程内复用 matcher 和 scorer
+        # 线程内复用 matcher
         if _tls.matcher is None:
             _tls.matcher = ParagraphMatcher(config)
-            _tls.scorer = RiskScoringEngine(config)
         matcher = _tls.matcher
-        scorer = _tls.scorer
         if shared_matcher is not None:
             # 复用主线程已加载的 SBERT 模型
             matcher.semantic_matcher = shared_matcher
@@ -466,7 +462,6 @@ def analyze_pair_worker(args: tuple) -> dict:
                     },
                     evidence=evidence,
                 )
-                result = scorer._score_pair(result, enabled_dims=config.ENABLED_DIMENSIONS)
                 cache.store_pairwise_result(result)
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
@@ -504,7 +499,6 @@ def analyze_pair_worker(args: tuple) -> dict:
             },
             evidence=evidence,
         )
-        result = scorer._score_pair(result, enabled_dims=config.ENABLED_DIMENSIONS)
         cache.store_pairwise_result(result)
         cache.mark_pair_processed(doc_a_id, doc_b_id)
         cache.conn.commit()

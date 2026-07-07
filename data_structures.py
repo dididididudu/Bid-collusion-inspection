@@ -102,6 +102,7 @@ class ChunkResult:
     paragraphs: List[str] = field(default_factory=list)
     paragraph_hashes: List[str] = field(default_factory=list)
     paragraph_tokens: List[List[str]] = field(default_factory=list)
+    paragraph_page_nums: List[int] = field(default_factory=list)  # 每个段落对应的页码
     simhash: str = ""
     quotes: List[float] = field(default_factory=list)
     image_hashes: List[str] = field(default_factory=list)

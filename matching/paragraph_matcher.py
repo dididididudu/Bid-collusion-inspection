@@ -146,6 +146,8 @@ class ParagraphMatcher:
                             'similarity': word_jaccard,
                             'paragraph_a_index': i,
                             'paragraph_b_index': j,
+                            'page_num_a': para_full_a.get(i, {}).get('page_num', -1),
+                            'page_num_b': para_full_b.get(j, {}).get('page_num', -1),
                             'detection_method': 'Exact-Jaccard',
                             'paragraph_a': text_a,
                             'paragraph_b': text_b,
@@ -201,7 +203,7 @@ class ParagraphMatcher:
                 for i, j, sim in stage1_candidates
             ]
 
-        # Fill in paragraph text for report generation
+        # Fill in paragraph text and page numbers for report generation
         for result in stage2_results:
             i = result['paragraph_a_index']
             j = result['paragraph_b_index']
@@ -210,6 +212,11 @@ class ParagraphMatcher:
                 result['paragraph_a'] = para_full_a.get(i, {}).get('text', '')
             if not result.get('paragraph_b'):
                 result['paragraph_b'] = para_full_b.get(j, {}).get('text', '')
+            # 填充页码
+            if 'page_num_a' not in result:
+                result['page_num_a'] = para_full_a.get(i, {}).get('page_num', -1)
+            if 'page_num_b' not in result:
+                result['page_num_b'] = para_full_b.get(j, {}).get('page_num', -1)
 
         # === 标书模板语过滤：降低招标文件原文/通用模板语的权重 ===
         if getattr(self.config, 'BID_BOILERPLATE_FILTER', False):

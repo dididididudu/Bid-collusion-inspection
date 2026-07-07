@@ -71,6 +71,13 @@ input/
 cache_old_*/
 checkpoints_old/
 
+# API 运行时产物
+workdir/
+checkpoints/
+runtime/
+output/
+*.log
+
 # IDE配置
 .claude/
 

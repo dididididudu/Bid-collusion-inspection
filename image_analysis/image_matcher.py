@@ -160,7 +160,7 @@ class ImageMatcher:
         )
 
         if not ocr_results_a or not ocr_results_b:
-            self._compute_image_risk_score(result, sigs_a_used, sigs_b_used)
+            result.image_risk_score = 0
             return result
 
         # === L2: 图片文字比对（SBERT 优先） ===
@@ -180,9 +180,6 @@ class ImageMatcher:
         self._detect_ps_suspicious_enhanced(
             ocr_results_a, ocr_results_b, result
         )
-
-        # === 综合评分 ===
-        self._compute_image_risk_score(result, sigs_a_used, sigs_b_used)
 
         return result
 
@@ -600,7 +597,7 @@ class ImageMatcher:
         return len(intersection) / len(union) if union else 0.0
 
     # ================================================================
-    # 综合评分（自适应加权）
+    # 图片证据归纳（已不再计算风险分，保留方法签名避免调用报错）
     # ================================================================
 
     def _compute_image_risk_score(
@@ -609,50 +606,5 @@ class ImageMatcher:
         sigs_a: List[ImageSignature] = None,
         sigs_b: List[ImageSignature] = None,
     ):
-        """自适应加权评分
-
-        根据检测到的证据类型动态调整权重：
-        - 多哈希共识匹配（L1）: 最可靠，权重最高
-        - SBERT 语义匹配（L2）: 可靠性高，权重中等
-        - 错别字/稀有词（L3）: 特定场景强信号
-        - PS 嫌疑（L4）: 多证据联合时可靠
-        """
-        score = 0
-        has_sbert = self.semantic_matcher is not None and self.semantic_matcher.is_available
-
-        # L1: 多哈希共识匹配（最可靠）
-        if hasattr(self.hasher, 'match_images'):
-            # 新系统：多哈希共识的证据权重更高
-            score += min(15, result.exact_image_count * 6)      # 每对6分（比旧版5分更重视）
-            score += min(8, result.near_identical_count * 3)    # 每对3分
-            score += min(3, result.similar_image_count * 1)     # 每对1分
-        else:
-            score += min(15, result.exact_image_count * 5)
-            score += min(8, result.near_identical_count * 2)
-
-        # L2: 图片文字匹配
-        if has_sbert:
-            # SBERT 匹配比 Jaccard 更可靠，权重稍高
-            score += min(5, result.text_identical_count * 2)
-            score += min(2, result.text_similar_count * 1)
-        else:
-            score += min(5, result.text_identical_count * 2)
-
-        # L3: 相同错别字 + 稀有词
-        if result.shared_typo_count >= 2:
-            score += min(8, result.shared_typo_count * 2)
-        if len(result.shared_rare_words) >= 3:
-            score += min(3, len(result.shared_rare_words) * 1)
-
-        # L4: PS 嫌疑（多证据联合时可靠）
-        if result.ps_suspicious:
-            # 检查是否有尺寸证据支撑
-            has_dimension_evidence = any(
-                p.get('dimension_match', False) for p in result.ps_details
-            )
-            if has_dimension_evidence:
-                score += 12  # 有尺寸证据 → 更可靠
-            else:
-                score += 8   # 仅有文字证据 → 谨慎
-
-        result.image_risk_score = min(30, score)
+        """简化版：不再计算图片风险分"""
+        result.image_risk_score = 0

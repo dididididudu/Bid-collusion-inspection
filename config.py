@@ -138,6 +138,19 @@ class DetectionConfig:
             self._auto_detect_device()
         self._apply_env_overrides()
 
+        # Worker 数合理性：不超过 CPU 核心数
+        import os as _os
+        _cpu = _os.cpu_count() or 4
+        if self.PHASE1_WORKERS > _cpu:
+            self.PHASE1_WORKERS = max(1, _cpu // 2)
+            logger.info(f"PHASE1_WORKERS 修正为 {self.PHASE1_WORKERS} (CPU={_cpu})")
+        if self.PHASE3_WORKERS > _cpu:
+            self.PHASE3_WORKERS = max(1, _cpu // 2)
+            logger.info(f"PHASE3_WORKERS 修正为 {self.PHASE3_WORKERS} (CPU={_cpu})")
+        if self.OCR_WORKERS < 1 or self.OCR_WORKERS > _cpu:
+            self.OCR_WORKERS = max(1, min(_cpu, 4))
+            logger.info(f"OCR_WORKERS 修正为 {self.OCR_WORKERS}")
+
     def _auto_detect_device(self):
         try:
             import torch

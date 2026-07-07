@@ -43,6 +43,31 @@ from report import ReportGenerator
 
 logger = logging.getLogger(__name__)
 
+# API 日志轮转（10MB × 3 备份）
+_log_handler = logging.handlers.RotatingFileHandler(
+    'api_server.log', maxBytes=10 * 1024 * 1024, backupCount=3,
+    encoding='utf-8',
+)
+_log_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+logging.getLogger().addHandler(_log_handler)
+
+# 静默第三方库的 INFO 日志
+for _lib in ['jieba', 'paddleocr', 'paddle', 'paddlex', 'easyocr',
+             'torch', 'cv2', 'matplotlib', 'urllib3',
+             'transformers', 'sentence_transformers', 'sklearn', 'PIL']:
+    logging.getLogger(_lib).setLevel(logging.WARNING)
+for _mod in ['pipeline.checkpoint', 'pipeline.streaming_context',
+             'pipeline.parallel_workers', 'pipeline.ocr_helpers',
+             'extraction.pdf_extractor', 'extraction.feature_cache',
+             'extraction.text_processor', 'matching.paragraph_matcher',
+             'matching.semantic_matcher', 'matching.lsh_index',
+             'matching.selector', 'embedding.embedding_engine',
+             'image_analysis.image_hasher', 'image_analysis.image_matcher',
+             'image_analysis.image_ocr']:
+    logging.getLogger(_mod).setLevel(logging.WARNING)
+
 # ============================================================
 # FastAPI 应用
 # ============================================================
@@ -98,6 +123,20 @@ _sbert_lock = threading.Lock()
 # 临时工作目录
 WORK_DIR = os.environ.get("BID_WORK_DIR", os.path.join(_project_root, "workdir"))
 os.makedirs(WORK_DIR, exist_ok=True)
+
+# 后台定时清理：每小时删除超过 1 小时的旧任务目录
+def _cleanup_worker():
+    while True:
+        time.sleep(3600)
+        now = time.time()
+        for name in os.listdir(WORK_DIR):
+            path = os.path.join(WORK_DIR, name)
+            if os.path.isdir(path) and len(name) == 36:
+                if (now - os.path.getmtime(path)) / 3600 > 1:
+                    shutil.rmtree(path, ignore_errors=True)
+
+_cleanup_thread = threading.Thread(target=_cleanup_worker, daemon=True)
+_cleanup_thread.start()
 
 
 # ============================================================
@@ -222,9 +261,6 @@ def _run_detection_impl(task_id: str):
             "total_files": report.total_files,
             "total_pairs": report.total_pairs,
             "suspicious_pairs": report.suspicious_pairs,
-            "high_risk_pairs": report.high_risk_pairs,
-            "risk_score": max((r.risk_score for r in report.pairwise_results), default=0),
-            "risk_level": _max_risk_level(report),
             "dimensions": dims,
             "pairwise_results": report_dict.get("pairwise_results", []),
         }
@@ -237,6 +273,10 @@ def _run_detection_impl(task_id: str):
         record.status = "failed"
         record.error = str(e)
         record.completed_at = datetime.now().isoformat()
+    finally:
+        import shutil
+        if record and record.work_dir and os.path.exists(record.work_dir):
+            shutil.rmtree(record.work_dir, ignore_errors=True)
 
 
 def _build_dimension_hits(report, config):
@@ -253,7 +293,7 @@ def _build_dimension_hits(report, config):
         for pair in report.pairwise_results:
             ev = pair.evidence
             if dim_key == "content_similarity":
-                if ev.text_evidence.local_similarity >= 0.3 or ev.image_evidence.image_risk_score > 0:
+                if ev.text_evidence.local_similarity >= 0.3 or ev.image_evidence.common_image_count > 0 or ev.image_evidence.text_identical_count > 0:
                     hit = True
                     break
             elif dim_key == "file_id":
@@ -288,15 +328,6 @@ def _build_dimension_hits(report, config):
         result[dim_key] = {"enabled": True, "hit": hit}
 
     return result
-
-
-def _max_risk_level(report) -> str:
-    levels = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
-    best = "NONE"
-    for pair in report.pairwise_results:
-        if levels.get(pair.risk_level, 0) > levels.get(best, 0):
-            best = pair.risk_level
-    return best
 
 
 # ============================================================

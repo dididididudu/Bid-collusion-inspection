@@ -203,19 +203,31 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
                 chunk_text = "\n".join(all_text_parts)
 
-                # 段落分割 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
-                paragraphs = self._split_paragraphs(chunk_text)
-                paragraph_hashes = []
+                # 按页分段 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
+                # 与旧版不同：逐页分段，记录每段的页码
+                paragraphs = []
+                paragraph_page_nums = []
                 paragraph_tokens = []
                 chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
 
-                for para in paragraphs:
-                    para_words = [
-                        w for w in jieba.cut(para)
-                        if w not in self.stopwords and len(w) > 1
-                    ]
-                    paragraph_tokens.append(para_words)
-                    chunk_tokens.extend(para_words)
+                for page_num in range(chunk_start, chunk_end):
+                    try:
+                        page = doc[page_num]
+                        page_text = page.get_text("text")
+                    except Exception:
+                        continue
+                    if not page_text:
+                        continue
+                    page_paragraphs = self._split_paragraphs(page_text)
+                    for para in page_paragraphs:
+                        para_words = [
+                            w for w in jieba.cut(para)
+                            if w not in self.stopwords and len(w) > 1
+                        ]
+                        paragraphs.append(para)
+                        paragraph_page_nums.append(page_num)
+                        paragraph_tokens.append(para_words)
+                        chunk_tokens.extend(para_words)
 
                 # 计算 SimHash
                 simhash = self._compute_simhash_from_tokens(chunk_tokens) if chunk_tokens else ""
@@ -251,6 +263,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     paragraphs=paragraphs,
                     paragraph_hashes=paragraph_hashes,
                     paragraph_tokens=paragraph_tokens,
+                    paragraph_page_nums=paragraph_page_nums,
                     simhash=simhash,
                     quotes=quotes,
                     image_hashes=all_image_hashes,

@@ -1002,6 +1002,7 @@ class BidDetectionOrchestrator:
             text=all_text,
             paragraphs=paragraphs,
             paragraph_hashes=paragraph_hashes,
+            paragraph_page_nums=[-1] * len(paragraphs),  # OCR 段落无具体页码
             simhash=simhash,
             quotes=quotes,
             image_hashes=[],
@@ -1167,9 +1168,6 @@ class BidDetectionOrchestrator:
                 evidence=evidence,
             )
 
-            # 风险评分
-            result = self.scoring_engine._score_pair(result, enabled_dims=self.config.ENABLED_DIMENSIONS)
-
             # 存储结果
             self.cache.store_pairwise_result(result)
             self.cache.mark_pair_processed(doc_a_id, doc_b_id)
@@ -1261,8 +1259,6 @@ class BidDetectionOrchestrator:
             evidence=evidence,
         )
 
-        # 风险评分
-        result = self.scoring_engine._score_pair(result, enabled_dims=self.config.ENABLED_DIMENSIONS)
         self.cache.store_pairwise_result(result)
         self.cache.mark_pair_processed(doc_a_id, doc_b_id)
 

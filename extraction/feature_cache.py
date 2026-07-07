@@ -31,7 +31,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 7  # v7: paragraphs 新增 source 列 (text/ocr)
+    SCHEMA_VERSION = 8  # v8: paragraphs 新增 page_num 列 + 全局 para_index
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -119,6 +119,9 @@ class DocumentCache:
             # v7 迁移：paragraphs 新增 source 列
             if current_version < 7:
                 self._migrate_v7(cursor)
+            # v8 迁移：paragraphs 新增 page_num 列
+            if current_version < 8:
+                self._migrate_v8(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -229,6 +232,16 @@ class DocumentCache:
         except Exception:
             pass
 
+    def _migrate_v8(self, cursor):
+        """v8 迁移：paragraphs 新增 page_num 列"""
+        try:
+            cursor.execute(
+                "ALTER TABLE paragraphs ADD COLUMN page_num INTEGER DEFAULT -1"
+            )
+            logger.info("v8 迁移完成：paragraphs 新增 page_num 列")
+        except Exception:
+            pass
+
     def _create_tables(self, cursor):
         """创建所有表"""
         # 文档注册表
@@ -282,6 +295,7 @@ class DocumentCache:
                 doc_id TEXT NOT NULL,
                 chunk_id TEXT NOT NULL,
                 para_index INTEGER NOT NULL,
+                page_num INTEGER DEFAULT -1,
                 text TEXT,
                 minhash TEXT DEFAULT '',
                 tokens TEXT DEFAULT '',
@@ -544,19 +558,30 @@ class DocumentCache:
 
             source = getattr(chunk_result, 'source', 'text')
             para_tokens = getattr(chunk_result, 'paragraph_tokens', [])
+            para_page_nums = getattr(chunk_result, 'paragraph_page_nums', [])
             import json as _json
+
+            # 获取文档当前的段落偏移量（支持多 chunk 全局 para_index）
+            cur = _conn.execute(
+                "SELECT COALESCE(MAX(para_index), -1) FROM paragraphs WHERE doc_id = ?",
+                (chunk_result.doc_id,)
+            )
+            para_offset = (cur.fetchone()[0] or -1) + 1
+
             para_rows = [
-                (self._para_id(chunk_result.doc_id, para_idx),
+                (self._para_id(chunk_result.doc_id, para_offset + para_idx),
                  chunk_result.doc_id, chunk_id,
-                 para_idx, para_text, para_hash, source,
+                 para_offset + para_idx,
+                 para_page_nums[para_idx] if para_idx < len(para_page_nums) else -1,
+                 para_text, para_hash, source,
                  _json.dumps(para_tokens[para_idx] if para_idx < len(para_tokens) else [], ensure_ascii=False))
                 for para_idx, (para_text, para_hash) in enumerate(
                     zip(chunk_result.paragraphs, chunk_result.paragraph_hashes))
             ]
             _conn.executemany("""
                 INSERT OR REPLACE INTO paragraphs (
-                    para_id, doc_id, chunk_id, para_index, text, minhash, source, tokens
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    para_id, doc_id, chunk_id, para_index, page_num, text, minhash, source, tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, para_rows)
 
             if _own_tx:
@@ -659,18 +684,19 @@ class DocumentCache:
         import json as _json
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT para_index, minhash, text, tokens, source "
+            "SELECT para_index, minhash, text, tokens, source, page_num "
             "FROM paragraphs WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
             "ORDER BY para_index", (doc_id,))
         result = {}
         for row in cursor.fetchall():
-            idx, mh, text, tokens_raw, source = row
+            idx, mh, text, tokens_raw, source, page_num = row
             tokens = []
             if tokens_raw:
                 try: tokens = _json.loads(tokens_raw)
                 except: pass
             result[idx] = {'minhash': mh or '', 'text': text or '',
-                           'tokens': tokens, 'source': source or 'text'}
+                           'tokens': tokens, 'source': source or 'text',
+                           'page_num': page_num if page_num is not None else -1}
         return result
 
     def load_all_paragraphs_with_tokens(self, doc_id: str) -> Dict[int, dict]:
@@ -1296,9 +1322,9 @@ class DocumentCache:
     def _fill_paragraph_texts_and_highlights(
         self, para_matches: List[Dict], doc_a_id: str, doc_b_id: str
     ) -> None:
-        """为段落匹配填充完整文本并计算高亮标记和共同部分
+        """为段落匹配填充完整文本、页码并计算高亮标记和共同部分
 
-        从 paragraphs 表中加载段落文本，然后使用 difflib 计算
+        从 paragraphs 表中加载段落文本和页码，然后使用 difflib 计算
         【】高亮标记文本和共同文本片段。
 
         此方法原地修改 para_matches 列表中的每个字典。
@@ -1306,9 +1332,9 @@ class DocumentCache:
         if not para_matches:
             return
 
-        # 批量加载两个文档的所有段落文本（避免逐条查询）
-        texts_a = self._batch_load_paragraph_texts(doc_a_id)
-        texts_b = self._batch_load_paragraph_texts(doc_b_id)
+        # 批量加载两个文档的所有段落文本和页码（避免逐条查询）
+        texts_a, pages_a = self._batch_load_paragraph_texts(doc_a_id)
+        texts_b, pages_b = self._batch_load_paragraph_texts(doc_b_id)
 
         for match in para_matches:
             idx_a = match.get('paragraph_a_index', -1)
@@ -1323,6 +1349,12 @@ class DocumentCache:
             if text_b:
                 match['paragraph_b'] = text_b
 
+            # 填充页码（存库时不存页码，从段落表反查）
+            if 'page_num_a' not in match or match.get('page_num_a', -2) == -2:
+                match['page_num_a'] = pages_a.get(idx_a, -1)
+            if 'page_num_b' not in match or match.get('page_num_b', -2) == -2:
+                match['page_num_b'] = pages_b.get(idx_b, -1)
+
             # 计算高亮文本和共同部分
             if text_a and text_b:
                 hl_a, hl_b, common = compute_text_diff(text_a, text_b)
@@ -1330,19 +1362,25 @@ class DocumentCache:
                 match['highlighted_text_b'] = hl_b
                 match['common_parts'] = common
 
-    def _batch_load_paragraph_texts(self, doc_id: str) -> Dict[int, str]:
-        """批量加载文档的所有段落文本
+    def _batch_load_paragraph_texts(self, doc_id: str):
+        """批量加载文档的所有段落文本和页码
 
         Returns:
-            Dict[para_index, text]
+            (Dict[para_index, text], Dict[para_index, page_num])
         """
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT para_index, text FROM paragraphs "
+            "SELECT para_index, text, page_num FROM paragraphs "
             "WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
             "ORDER BY para_index",
             (doc_id,)
         )
+        texts = {}
+        pages = {}
+        for row in cursor.fetchall():
+            texts[row[0]] = row[1] or ''
+            pages[row[0]] = row[2] if row[2] is not None else -1
+        return texts, pages
         return {row[0]: row[1] for row in cursor.fetchall()}
 
     def clear_cache(self) -> None:
