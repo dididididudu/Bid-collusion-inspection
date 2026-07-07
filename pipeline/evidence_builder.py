@@ -63,7 +63,8 @@ def build_contact_evidence(
                          ('mobile_phones', 'common_mobiles'),
                          ('emails', 'common_emails'),
                          ('credit_codes', 'common_credit_codes'),
-                         ('member_ids', 'common_member_ids')]:
+                         ('member_ids', 'common_member_ids'),
+                         ('potential_names', 'common_potential_names')]:
         set_a = set(fp_a.get(key, []))
         set_b = set(fp_b.get(key, []))
         common = list(set_a & set_b)

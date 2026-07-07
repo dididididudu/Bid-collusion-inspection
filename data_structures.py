@@ -219,6 +219,7 @@ class ContactEvidence:
     common_emails: List[str] = field(default_factory=list)        # 相同邮箱
     common_credit_codes: List[str] = field(default_factory=list)  # 相同统一社会信用代码
     common_member_ids: List[str] = field(default_factory=list)   # 相同会员号（外部 API 注入）
+    common_potential_names: List[str] = field(default_factory=list)  # 宽松匹配相同潜在人名
 
 
 @dataclass
