@@ -166,7 +166,7 @@ def ocr_pages(
         and gpu_manager.enabled
     )
     if not use_gpu_manager:
-        if not ocr_engine.is_available:
+        if ocr_engine is None or not ocr_engine.is_available:
             logger.debug("OCR 引擎不可用，跳过图片文字提取")
             return 0
 

@@ -10,55 +10,46 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resou
 warnings.filterwarnings('ignore', category=UserWarning, module='jieba')
 import os
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict
+import json
+import threading as _threading
 
-from config import DetectionConfig
 from data_structures import (
-    BidFeature, PairwiseResult, EvidenceChain,
-    TextEvidence, MetadataEvidence, ImageEvidence,
-    ChunkResult, QuoteSignature,
+    BidFeature, ChunkResult, PairwiseResult, EvidenceChain,
+    TextEvidence, MetadataEvidence, ImageEvidence, QuoteSignature,
 )
-from image_analysis.image_ocr import ImageOCREngine, OCRResult
-from image_analysis.image_matcher import ImageMatcher
+from extraction.feature_cache import DocumentCache
+from extraction.pdf_extractor import PyMuPDFExtractor
+from extraction.text_processor import ChunkedTextProcessor
+from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.evidence_builder import (
-    build_metadata_evidence, build_image_evidence, build_text_evidence,
+    build_metadata_evidence, build_text_evidence,
 )
-from pipeline.ocr_helpers import ocr_pages, aggregate_ocr_paragraphs
+from image_analysis.image_ocr import OCRResult
+from image_analysis.image_matcher import ImageMatcher
 
 logger = logging.getLogger(__name__)
+_tls = _threading.local()
 
 
-# ================================================================
-# 共享辅助函数：OCR 页面文字提取
-# ================================================================
-
-# _ocr_pages → 委托给 ocr_helpers.ocr_pages()
-_ocr_pages = ocr_pages
-
-
-# ================================================================
-# 共享辅助函数：OCR 文字 → 段落聚合
-# ================================================================
-
-# _aggregate_ocr_paragraphs → 委托给 ocr_helpers.aggregate_ocr_paragraphs()
-_aggregate_ocr_paragraphs = aggregate_ocr_paragraphs
+def _get_thread_cache(db_dir, config):
+    if not hasattr(_tls, 'cache'):
+        from extraction.feature_cache import DocumentCache
+        _tls.cache = DocumentCache(db_dir, config)
+        _tls.doc_cache = {}
+        _tls.matcher = None
+    return _tls.cache
 
 
-# ================================================================
-# 共享辅助函数：证据构建
-# ================================================================
-
-# _build_metadata_evidence → 委托给 evidence_builder.build_metadata_evidence()
-_build_metadata_evidence = build_metadata_evidence
+def _get_thread_doc(doc_id, cache):
+    if doc_id not in _tls.doc_cache:
+        _tls.doc_cache[doc_id] = cache.load_document(doc_id)
+    return _tls.doc_cache[doc_id]
 
 
-def _build_image_evidence(
-    doc_a: BidFeature, doc_b: BidFeature, cache,
-    config: DetectionConfig = None,
-) -> ImageEvidence:
-    """构建增强图片证据 — 四层检测"""
+def _build_image_evidence(doc_a, doc_b, cache, config=None):
     evidence = ImageEvidence()
-
     hashes_a = doc_a.image_hashes
     hashes_b = doc_b.image_hashes
     common_exact = list(set(hashes_a) & set(hashes_b))
@@ -67,48 +58,31 @@ def _build_image_evidence(
 
     ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
     ocr_b = cache.load_image_ocr_results(doc_b.doc_id)
-
-    if ocr_a:
-        evidence.ocr_results_a = ocr_a
-    if ocr_b:
-        evidence.ocr_results_b = ocr_b
+    if ocr_a: evidence.ocr_results_a = ocr_a
+    if ocr_b: evidence.ocr_results_b = ocr_b
 
     ocr_objects_a = [
-        OCRResult(
-            text=r['ocr_text'],
-            words=r['ocr_words'],
-            bboxes=r['bboxes'],
-            confidence=r['confidence'],
-            image_hash=r.get('image_hash', ''),
-            non_text_hash=r.get('non_text_hash', ''),
-            image_width=r.get('image_width', 0),
-            image_height=r.get('image_height', 0),
-            thumbnail=r.get('thumbnail', b''),
-        ) for r in ocr_a
+        OCRResult(text=r['ocr_text'], words=r['ocr_words'], bboxes=r['bboxes'],
+                  confidence=r['confidence'], image_hash=r.get('image_hash', ''),
+                  non_text_hash=r.get('non_text_hash', ''),
+                  image_width=r.get('image_width', 0), image_height=r.get('image_height', 0),
+                  thumbnail=r.get('thumbnail', b''))
+        for r in ocr_a
     ]
     ocr_objects_b = [
-        OCRResult(
-            text=r['ocr_text'],
-            words=r['ocr_words'],
-            bboxes=r['bboxes'],
-            confidence=r['confidence'],
-            image_hash=r.get('image_hash', ''),
-            non_text_hash=r.get('non_text_hash', ''),
-            image_width=r.get('image_width', 0),
-            image_height=r.get('image_height', 0),
-            thumbnail=r.get('thumbnail', b''),
-        ) for r in ocr_b
+        OCRResult(text=r['ocr_text'], words=r['ocr_words'], bboxes=r['bboxes'],
+                  confidence=r['confidence'], image_hash=r.get('image_hash', ''),
+                  non_text_hash=r.get('non_text_hash', ''),
+                  image_width=r.get('image_width', 0), image_height=r.get('image_height', 0),
+                  thumbnail=r.get('thumbnail', b''))
+        for r in ocr_b
     ]
 
-    # 方案6：从配置读取模板哈希黑名单
     boilerplate_hashes = set(config.IMAGE_BOILERPLATE_HASHES) if config and config.IMAGE_BOILERPLATE_HASHES else None
-
     matcher = ImageMatcher()
     match_result = matcher.analyze(
-        hashes_a=hashes_a,
-        hashes_b=hashes_b,
-        ocr_results_a=ocr_objects_a if ocr_objects_a else None,
-        ocr_results_b=ocr_objects_b if ocr_objects_b else None,
+        hashes_a=hashes_a, hashes_b=hashes_b,
+        ocr_results_a=ocr_objects_a or None, ocr_results_b=ocr_objects_b or None,
         boilerplate_hashes=boilerplate_hashes,
     )
 
@@ -123,188 +97,96 @@ def _build_image_evidence(
     evidence.text_similar_count = match_result.text_similar_count
     evidence.image_risk_score = match_result.image_risk_score
     evidence.image_risk_factors = match_result.image_risk_factors
-
     return evidence
 
 
-# ================================================================
-# Phase 1 Worker: 单文档提取 (ProcessPoolExecutor)
-# ================================================================
-
 def extract_single_worker(args: tuple) -> dict:
-    """Phase 1 worker: 提取单个 PDF，结果存入 SQLite
-
-    Args:
-        args: (file_path, config_dict, db_dir, gpu_manager_client?) → 4 元组
-              args: (file_path, config_dict, db_dir) → 3 元组（兼容旧调用）
-
-    Returns:
-        {"doc_id": str, "filename": str, "success": bool, "error": str}
-    """
-    file_path, config_dict, db_dir = args[:3]
-    gpu_manager_client = args[3] if len(args) > 3 else None
-
+    """Phase 1 worker: 提取单个文档的特征"""
+    file_path, config_dict, db_dir, gpu_manager_client = args
+    from config import DetectionConfig
     config = DetectionConfig(**config_dict)
-    cache = None
-    doc_id = ""
+    ocr_engine = None
+    use_gpu_mgr = gpu_manager_client is not None
 
     try:
-        from extraction.feature_cache import DocumentCache
-        from extraction.pdf_extractor import PyMuPDFExtractor
-        from extraction.text_processor import ChunkedTextProcessor
-
-        cache = DocumentCache(db_dir, config)
-
+        from extraction.contact_extractor import extract_contacts_from_sqlite
+        cache = _get_thread_cache(db_dir, config)
         extractor = PyMuPDFExtractor(config)
         text_processor = ChunkedTextProcessor(config)
 
-        # GPU Manager 模式下跳过本地引擎创建（引擎在 Manager 进程中）
-        use_gpu_mgr = (
-            gpu_manager_client is not None
-            and gpu_manager_client.enabled
-        )
-        ocr_engine = None
         if config.ENABLE_OCR and not use_gpu_mgr:
+            from image_analysis.image_ocr import ImageOCREngine
             ocr_engine = ImageOCREngine(
-                use_gpu=config.USE_GPU,
-                engine=config.OCR_ENGINE,
-                model_dir=config.OCR_MODEL_DIR,
-                offline=config.OCR_OFFLINE_MODE,
+                use_gpu=config.USE_GPU, engine=config.OCR_ENGINE,
+                model_dir=config.OCR_MODEL_DIR, offline=config.OCR_OFFLINE_MODE,
                 retry_count=config.OCR_RETRY_COUNT,
             )
 
-        # --- 元数据 ---
         metadata, page_count, is_scanned = extractor.extract_metadata(file_path)
         doc_id = extractor._generate_doc_id(file_path)
         filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
 
-        # 检查断点续传
         existing_chunks = cache.load_document_chunks(doc_id)
         processed_chunks = {c.chunk_index for c in existing_chunks}
 
-        if is_scanned:
-            # === 扫描版 PDF ===
-            logger.info(f"[Worker] 扫描版: {filename} ({page_count} 页)")
+        # === 文本版 PDF ===
+        start_page = max(
+            (max(processed_chunks) + 1) * config.CHUNK_PAGE_SIZE
+            if processed_chunks else 0, 0
+        )
 
-            all_page_hashes = extractor.extract_all_page_hashes(
-                file_path, sample_step=2
-            )
-
-            chunks = []
-            cache.conn.execute("BEGIN IMMEDIATE")
+        if start_page >= page_count and page_count > 0:
+            logger.info(f"[Worker] 已完全提取: {filename}")
             try:
-                for chunk_result in extractor.extract_chunks(
-                    file_path, config.CHUNK_PAGE_SIZE, 0
-                ):
-                    chunk_result.image_hashes = all_page_hashes
-                    cache.store_chunk(chunk_result, conn=cache.conn)
-                    chunks.append(chunk_result)
-                cache.conn.execute("COMMIT")
+                fp = extract_contacts_from_sqlite(doc_id, cache)
+                cache.store_contact_fingerprint(doc_id, fp.to_json())
             except Exception:
-                cache.conn.execute("ROLLBACK")
-                raise
+                pass
+            cache.conn.commit()
+            cache.close()
+            return {"doc_id": doc_id, "filename": filename, "success": True}
 
-            if chunks:
-                feature = text_processor.aggregate_chunks(
-                    doc_id=doc_id, filename=filename, file_size=file_size,
-                    chunks=chunks, metadata=metadata,
-                    is_scanned=True, page_count=page_count,
-                )
-                feature.image_hashes = list(set(
-                    feature.image_hashes + all_page_hashes
-                ))
-                cache.store_document(feature)
-
-                if ocr_engine is not None or use_gpu_mgr:
-                    _ocr_pages(
-                        file_path, doc_id, page_count, cache,
-                        config, ocr_engine, force=True,
-                        ocr_workers=config.OCR_WORKERS,
-                        gpu_manager=gpu_manager_client,
-                    )
-                    _aggregate_ocr_paragraphs(
-                        doc_id, page_count, cache, extractor, text_processor,
-                    )
-            else:
-                # 纯扫描版，无文本
-                feature = BidFeature(
-                    doc_id=doc_id, filename=filename,
-                    file_size=file_size, text_content="",
-                    text_length=0, text_simhash="",
-                    paragraphs=[], paragraph_hashes=[],
-                    metadata=metadata, quotes=[],
-                    quote_signature=QuoteSignature(),
-                    image_hashes=all_page_hashes,
-                    is_scanned=True, page_count=page_count,
-                    doc_minhash=None, chunk_count=0,
-                )
-                cache.store_document(feature)
-
-                if ocr_engine is not None or use_gpu_mgr:
-                    _ocr_pages(
-                        file_path, doc_id, page_count, cache,
-                        config, ocr_engine, force=True,
-                        ocr_workers=config.OCR_WORKERS,
-                        gpu_manager=gpu_manager_client,
-                    )
-                    _aggregate_ocr_paragraphs(
-                        doc_id, page_count, cache, extractor, text_processor,
-                    )
-
-        else:
-            # === 文本版 PDF ===
-            start_page = max(
-                (max(processed_chunks) + 1) * config.CHUNK_PAGE_SIZE
-                if processed_chunks else 0, 0
-            )
-
-            if start_page >= page_count and page_count > 0:
-                logger.info(f"[Worker] 已完全提取: {filename}")
-                cache.close()
-                return {"doc_id": doc_id, "filename": filename, "success": True}
-
-            chunks = []
-            chunk_size = config.CHUNK_PAGE_SIZE
-
-            # 单事务批量写入（C+1 commit → 1 commit）
-            cache.conn.execute("BEGIN IMMEDIATE")
-            try:
-                for chunk_result in extractor.extract_chunks(
-                    file_path, chunk_size, start_page
-                ):
-                    cache.store_chunk(chunk_result, conn=cache.conn)
-                    chunks.append(chunk_result)
-                cache.conn.execute("COMMIT")
-            except Exception:
-                cache.conn.execute("ROLLBACK")
-                raise
-
-            if chunks:
-                feature = text_processor.aggregate_chunks(
-                    doc_id=doc_id, filename=filename, file_size=file_size,
-                    chunks=chunks, metadata=metadata,
-                    is_scanned=False, page_count=page_count,
-                )
-
-                all_img_hashes = set()
-                for c in chunks:
-                    all_img_hashes.update(c.image_hashes)
-                feature.image_hashes = list(all_img_hashes)
-
-                cache.store_document(feature)
-
-                if ocr_engine is not None or use_gpu_mgr:
-                    _ocr_pages(
-                        file_path, doc_id, page_count, cache,
-                        config, ocr_engine, force=False,
-                        ocr_workers=config.OCR_WORKERS,
-                        gpu_manager=gpu_manager_client,
-                    )
-
-        # 提取联系人指纹（公司名/姓名/电话/邮箱）
+        chunks = []
+        cache.conn.execute("BEGIN IMMEDIATE")
         try:
-            from extraction.contact_extractor import extract_contacts_from_sqlite
+            for chunk_result in extractor.extract_chunks(file_path, config.CHUNK_PAGE_SIZE, start_page):
+                cache.store_chunk(chunk_result, conn=cache.conn)
+                chunks.append(chunk_result)
+            cache.conn.execute("COMMIT")
+        except Exception:
+            cache.conn.execute("ROLLBACK")
+            raise
+
+        if chunks:
+            feature = text_processor.aggregate_chunks(
+                doc_id=doc_id, filename=filename, file_size=file_size,
+                chunks=chunks, metadata=metadata,
+                is_scanned=False, page_count=page_count,
+            )
+            all_img_hashes = set()
+            for c in chunks:
+                all_img_hashes.update(c.image_hashes)
+            feature.image_hashes = list(all_img_hashes)
+            cache.store_document(feature)
+
+            if ocr_engine is not None:
+                from pipeline.ocr_helpers import ocr_pages as _ocr_pages
+                _ocr_pages(
+                    file_path, doc_id, page_count, cache,
+                    config, ocr_engine, force=False,
+                    ocr_workers=config.OCR_WORKERS,
+                )
+            elif use_gpu_mgr:
+                from pipeline.ocr_helpers import ocr_pages as _ocr_pages
+                _ocr_pages(
+                    file_path, doc_id, page_count, cache,
+                    config, ocr_engine, force=False,
+                    ocr_workers=config.OCR_WORKERS,
+                    gpu_manager=gpu_manager_client,
+                )
+
+        try:
             fp = extract_contacts_from_sqlite(doc_id, cache)
             cache.store_contact_fingerprint(doc_id, fp.to_json())
         except Exception:
@@ -316,120 +198,28 @@ def extract_single_worker(args: tuple) -> dict:
 
     except Exception as e:
         logger.error(f"[Worker] 失败 ({file_path}): {e}", exc_info=True)
-        return {
-            "doc_id": doc_id,
-            "filename": os.path.basename(file_path),
-            "success": False,
-            "error": str(e),
-        }
+        return {"doc_id": "", "filename": os.path.basename(file_path),
+                "success": False, "error": str(e)}
     finally:
         if cache:
             cache.close()
             for attr in ['cache', 'doc_cache', 'matcher']:
                 if hasattr(_tls, attr):
                     delattr(_tls, attr)
-
-
-# ================================================================
-# Phase 1.5 Worker: 单文档嵌入编码 (ProcessPoolExecutor)
-# ================================================================
-
-def embed_single_worker(args: tuple) -> dict:
-    """Phase 1.5 worker: 编码一个文档的所有段落嵌入
-
-    Args:
-        args: (doc_id, config_dict, db_dir)
-
-    Returns:
-        {"doc_id": str, "success": bool, "paragraphs_encoded": int, "error": str}
-    """
-    doc_id, config_dict, db_dir = args
-
-    config = DetectionConfig(**config_dict)
-    cache = None
-    try:
-        from extraction.feature_cache import DocumentCache
-        from embedding.embedding_engine import EmbeddingEngine
-
-        cache = DocumentCache(db_dir, config)
-
-        engine = EmbeddingEngine(config)
-        if not engine.is_available:
-            return {"doc_id": doc_id, "success": False,
-                    "paragraphs_encoded": 0, "error": "SBERT unavailable"}
-
-        doc_feat = cache.load_document(doc_id)
-        if not doc_feat or not doc_feat.doc_minhash:
-            return {"doc_id": doc_id, "success": False,
-                    "paragraphs_encoded": 0, "error": "No MinHash"}
-
-        paragraphs = cache.load_all_paragraphs_text(doc_id)
-        if paragraphs:
-            count = engine.encode_document(doc_id, paragraphs, cache)
-            cache.conn.commit()
-            return {"doc_id": doc_id, "success": True,
-                    "paragraphs_encoded": count, "error": ""}
-        else:
-            return {"doc_id": doc_id, "success": False,
-                    "paragraphs_encoded": 0, "error": "No paragraphs"}
-
-    except Exception as e:
-        logger.error(f"[Embed Worker] 失败 ({doc_id}): {e}", exc_info=True)
-        return {"doc_id": doc_id, "success": False,
-                "paragraphs_encoded": 0, "error": str(e)}
-    finally:
-        if cache:
-            cache.close()
-            for attr in ['cache', 'doc_cache', 'matcher']:
-                if hasattr(_tls, attr):
-                    delattr(_tls, attr)
-
-
-# ================================================================
-# Phase 3 Worker: 单对分析 (ThreadPoolExecutor)
-# ================================================================
-
-# 线程本地缓存：同一线程内复用 SQLite 连接 + 文档数据，避免每对重复加载
-import threading as _threading
-_tls = _threading.local()
-
-
-def _get_thread_cache(db_dir, config):
-    """获取线程本地的 DocumentCache（每个线程只创建一次）"""
-    if not hasattr(_tls, 'cache'):
-        from extraction.feature_cache import DocumentCache
-        _tls.cache = DocumentCache(db_dir, config)
-        _tls.doc_cache = {}  # doc_id → BidFeature
-        _tls.matcher = None
-    return _tls.cache
-
-
-def _get_thread_doc(doc_id, cache):
-    """获取文档特征（线程本地缓存，避免重复 load_document）"""
-    if doc_id not in _tls.doc_cache:
-        _tls.doc_cache[doc_id] = cache.load_document(doc_id)
-    return _tls.doc_cache[doc_id]
 
 
 def analyze_pair_worker(args: tuple) -> dict:
-    """Phase 3 worker: 分析一个候选文档对
-
-    Args:
-        args: (doc_a_id, doc_b_id, config_dict, db_dir, semantic_matcher)
-
-    Returns:
-        {"pair_id": str, "success": bool, "match_count": int, "error": str}
-    """
+    """Phase 3 worker: 分析一个候选文档对"""
     doc_a_id, doc_b_id, config_dict, db_dir = args[:4]
     shared_matcher = args[4] if len(args) > 4 else None
     pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
 
+    from config import DetectionConfig
     config = DetectionConfig(**config_dict)
     cache = None
     try:
         from matching.paragraph_matcher import ParagraphMatcher
 
-        # 线程本地缓存：同一线程内复用连接+文档数据（每文档从 49 次加载 → 1 次）
         cache = _get_thread_cache(db_dir, config)
         doc_a = _get_thread_doc(doc_a_id, cache)
         doc_b = _get_thread_doc(doc_b_id, cache)
@@ -437,33 +227,25 @@ def analyze_pair_worker(args: tuple) -> dict:
         if not doc_a or not doc_b:
             cache.mark_pair_processed(doc_a_id, doc_b_id)
             cache.conn.commit()
-            return {"pair_id": pair_id, "success": False,
-                    "match_count": 0, "error": "Doc not found"}
+            return {"pair_id": pair_id, "success": False, "match_count": 0, "error": "Doc not found"}
 
-        # 线程内复用 matcher
         if _tls.matcher is None:
             _tls.matcher = ParagraphMatcher(config)
         matcher = _tls.matcher
         if shared_matcher is not None:
-            # 复用主线程已加载的 SBERT 模型
             matcher.semantic_matcher = shared_matcher
 
-        # 检查文字可用性
         if not doc_a.doc_minhash or not doc_b.doc_minhash:
-            if doc_a.is_scanned or doc_b.is_scanned:
-                # 纯图片比对路径
+            if doc_a.image_hashes or doc_b.image_hashes:
                 image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
-                metadata_evidence = _build_metadata_evidence(doc_a, doc_b)
-
+                metadata_evidence = build_metadata_evidence(doc_a, doc_b)
                 evidence = EvidenceChain(
                     text_evidence=TextEvidence(),
                     metadata_evidence=metadata_evidence,
                     image_evidence=image_evidence,
                 )
-
                 result = PairwiseResult(
-                    pair_id=pair_id,
-                    doc_a_id=doc_a_id, doc_b_id=doc_b_id,
+                    pair_id=pair_id, doc_a_id=doc_a_id, doc_b_id=doc_b_id,
                     similarity_scores={
                         'text_local': 0.0,
                         'metadata_match': len(metadata_evidence.matched_fields),
@@ -474,28 +256,21 @@ def analyze_pair_worker(args: tuple) -> dict:
                 cache.store_pairwise_result(result)
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
-                return {"pair_id": pair_id, "success": True,
-                        "match_count": 0, "clone_block_count": 0,
-                        "text_similarity": 0.0,
+                return {"pair_id": pair_id, "success": True, "match_count": 0,
+                        "clone_block_count": 0, "text_similarity": 0.0,
                         "filename_a": doc_a.filename, "filename_b": doc_b.filename,
                         "error": ""}
             else:
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
-                return {"pair_id": pair_id, "success": True,
-                        "match_count": 0, "clone_block_count": 0,
-                        "text_similarity": 0.0,
+                return {"pair_id": pair_id, "success": True, "match_count": 0,
+                        "clone_block_count": 0, "text_similarity": 0.0,
                         "filename_a": doc_a.filename, "filename_b": doc_b.filename,
                         "error": ""}
 
-        # 正常文本分析路径
         paragraph_matches = matcher.match(doc_a, doc_b, cache)
-
-        # 构建证据
-        text_evidence = _build_text_evidence_basic(
-            doc_a, doc_b, paragraph_matches, config
-        )
-        metadata_evidence = _build_metadata_evidence(doc_a, doc_b)
+        text_evidence = _build_text_evidence_basic(doc_a, doc_b, paragraph_matches, config)
+        metadata_evidence = build_metadata_evidence(doc_a, doc_b)
         image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
 
         evidence = EvidenceChain(
@@ -505,8 +280,7 @@ def analyze_pair_worker(args: tuple) -> dict:
         )
 
         result = PairwiseResult(
-            pair_id=pair_id,
-            doc_a_id=doc_a_id, doc_b_id=doc_b_id,
+            pair_id=pair_id, doc_a_id=doc_a_id, doc_b_id=doc_b_id,
             similarity_scores={
                 'text_local': text_evidence.local_similarity,
                 'metadata_match': len(metadata_evidence.matched_fields),
@@ -544,23 +318,6 @@ def analyze_pair_worker(args: tuple) -> dict:
                     delattr(_tls, attr)
 
 
-def _build_text_evidence_basic(
-    doc_a: BidFeature, doc_b: BidFeature,
-    paragraph_matches: List[Dict], config: DetectionConfig,
-) -> TextEvidence:
-    """构建文本证据（基本版，不含差异高亮 — 委托 evidence_builder 复用）
-
-    差异高亮依赖 difflib.SequenceMatcher 且计算量大，
-    在 worker 中跳过，由 report 阶段按需计算。
-    """
-    return build_text_evidence(
-        doc_a, doc_b, paragraph_matches, config, compute_highlight=False
-    )
-
-
-def _detect_clone_blocks(
-    paragraph_matches: List[Dict], config: DetectionConfig
-) -> List[Dict]:
-    """检测连续克隆块（委托 evidence_builder 复用）"""
-    from pipeline.evidence_builder import _detect_clone_blocks as _dcb
-    return _dcb(paragraph_matches, config)
+def _build_text_evidence_basic(doc_a, doc_b, paragraph_matches, config):
+    from pipeline.evidence_builder import build_text_evidence
+    return build_text_evidence(doc_a, doc_b, paragraph_matches, config, compute_highlight=False)

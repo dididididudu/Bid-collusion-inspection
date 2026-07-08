@@ -45,17 +45,21 @@ class CandidatePairSelector:
         candidate_pairs: dict = {}  # (id_a, id_b) -> (method, similarity)
 
         valid_features = [f for f in features if f.doc_minhash]
+        # 补充：无文本但有图片的文档也应参与候选（图片比对）
+        image_only_features = [f for f in features if not f.doc_minhash and f.image_hashes]
         all_features = features
 
         # 小规模文档集直接全量比对
-        if len(valid_features) <= 5:
+        all_candidates = valid_features + image_only_features
+        if len(all_candidates) <= 5:
             logger.info(
-                f"文档数较少 ({len(valid_features)} 个)，直接全量比对"
+                f"文档数较少 ({len(all_candidates)} 个，"
+                f"含 {len(image_only_features)} 个仅图片文档)，直接全量比对"
             )
-            for i in range(len(valid_features)):
-                for j in range(i + 1, len(valid_features)):
+            for i in range(len(all_candidates)):
+                for j in range(i + 1, len(all_candidates)):
                     pair = tuple(sorted([
-                        valid_features[i].doc_id, valid_features[j].doc_id
+                        all_candidates[i].doc_id, all_candidates[j].doc_id
                     ]))
                     candidate_pairs[pair] = ("all_pairs", 0.0)
         else:
