@@ -65,8 +65,8 @@ class ImageMatcher:
     TEXT_MIN_LENGTH = 10                # 最小文字长度
 
     # L3 阈值
-    TYPO_MIN_COUNT = 2                  # 最少共同异常词数
-    TYPO_MIN_LENGTH = 2                 # 异常词最小长度
+    TYPO_MIN_COUNT = 3                  # 最少共同异常词数（提高，减少误报）
+    TYPO_MIN_LENGTH = 3                 # 异常词最小长度（提高，过滤短词）
 
     # L4 阈值
     NON_TEXT_HASH_SIMILAR = 10          # non_text 汉明距离 ≤ 此值视为背景相似
@@ -363,26 +363,36 @@ class ImageMatcher:
         words_b: List[str],
         result: ImageMatchResult,
     ):
-        """L3: 相同错别字检测"""
+        """L3: 相同错别字检测
+
+        只将同时满足以下条件的词视为错别字：
+        1. 不在常用词词典中
+        2. 且与另一个文档中的不同词构成形近字对（如 日↔曰）
+        或
+        3. 共享的不在词典中的词 ≥ TYPO_MIN_COUNT，且长度 ≥ 4
+        """
         if not words_a or not words_b:
             return
 
         common_words = self._get_common_word_set()
+        very_common = self._get_very_common_words()
 
-        invalid_a = {w for w in words_a
-                     if len(w) >= self.TYPO_MIN_LENGTH
-                     and w not in common_words
-                     and not w.isascii()}
-        invalid_b = {w for w in words_b
-                     if len(w) >= self.TYPO_MIN_LENGTH
-                     and w not in common_words
-                     and not w.isascii()}
+        # 不在常用词词典中的词（可能为正确专有名词或真正错别字）
+        suspicious_a = {w for w in words_a
+                        if len(w) >= self.TYPO_MIN_LENGTH
+                        and w not in common_words
+                        and w not in very_common
+                        and not w.isascii()}
+        suspicious_b = {w for w in words_b
+                        if len(w) >= self.TYPO_MIN_LENGTH
+                        and w not in common_words
+                        and w not in very_common
+                        and not w.isascii()}
 
-        shared_invalid = invalid_a & invalid_b
-
+        # === 1) 形近字错别字对（高置信度）===
         confusion_typos = set()
-        for wa in invalid_a:
-            for wb in invalid_b:
+        for wa in suspicious_a:
+            for wb in suspicious_b:
                 if len(wa) == len(wb) and wa != wb:
                     diffs = [(i, wa[i], wb[i]) for i in range(len(wa)) if wa[i] != wb[i]]
                     if len(diffs) == 1:
@@ -391,16 +401,35 @@ class ImageMatcher:
                            (cb, ca) in self._OCR_CONFUSION_PAIRS:
                             confusion_typos.add(f"{wa}↔{wb}")
 
-        all_typos = sorted(shared_invalid)[:15]
+        # === 2) 共享的"不在词典"词（高阈值才判定为错别字）===
+        shared_suspicious = suspicious_a & suspicious_b
+        # 过滤掉正确拼写的专有名词（长度≥4且不在混淆对中，很可能是正确词）
+        real_typos = set()
+        for w in shared_suspicious:
+            # 如果词在形近字错别字对中，直接计入
+            if any(w in ct for ct in confusion_typos):
+                real_typos.add(w)
+            # 否则仅长度 ≥ 4 且数量超过阈值才计入
+            elif len(w) >= 4:
+                real_typos.add(w)
+
+        all_typos = sorted(real_typos)[:15]
         if confusion_typos:
             all_typos.extend(sorted(confusion_typos)[:5])
+        # 去重
+        seen = set()
+        unique_typos = []
+        for t in all_typos:
+            if t not in seen:
+                seen.add(t)
+                unique_typos.append(t)
 
-        result.shared_typos = all_typos
-        result.shared_typo_count = len(shared_invalid) + len(confusion_typos)
+        result.shared_typos = unique_typos
+        result.shared_typo_count = len(real_typos) + len(confusion_typos)
 
         if result.shared_typo_count >= self.TYPO_MIN_COUNT:
-            detail = ', '.join(all_typos[:5])
-            if len(all_typos) > 5:
+            detail = ', '.join(unique_typos[:5])
+            if len(unique_typos) > 5:
                 detail += '...'
             result.image_risk_factors.append(
                 f"⚠ 相同错别字: {result.shared_typo_count} 个 ({detail})"

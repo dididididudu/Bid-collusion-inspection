@@ -144,18 +144,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
             page_count = doc.page_count
 
-            # 判断是否为扫描版（前 3 页文本量很少则判定为扫描版）
-            is_scanned = False
-            if page_count > 0:
-                sample_text = ""
-                for i in range(min(3, page_count)):
-                    try:
-                        sample_text += doc[i].get_text("text")
-                    except Exception:
-                        pass
-                is_scanned = len(sample_text.strip()) < 100
-
-            return metadata, page_count, is_scanned
+            return metadata, page_count, False
 
         finally:
             doc.close()
@@ -474,6 +463,34 @@ class PyMuPDFExtractor(BasePDFExtractor):
                             hashes.append(f"p{ph}")
                         except Exception:
                             continue
+
+                # === 策略4: 对所有嵌入图片补充原始字节哈希 ===
+                # 确保相同图片无论渲染位置是否相同，都有一致的原始字节哈希
+                try:
+                    for img_info in page.get_images(full=True):
+                        try:
+                            xref = img_info[0]
+                            w, h = img_info[2], img_info[3]
+                            if w < min_size or h < min_size:
+                                continue
+                            base = doc.extract_image(xref)
+                            if not base or not base.get("image"):
+                                continue
+                            img_bytes = base["image"]
+                            if len(img_bytes) < 1024:
+                                continue
+                            img = Image.open(io.BytesIO(img_bytes))
+                            if img.mode not in ('RGB', 'L'):
+                                img = img.convert('RGB')
+                            img.thumbnail((256, 256), Image.LANCZOS)
+                            ph = imagehash.phash(img)
+                            h = f"p{ph}"
+                            if h not in hashes:
+                                hashes.append(h)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
 
             except Exception as e:
                 logger.debug(f"页面 {page_num} 图片提取失败: {e}")

@@ -604,22 +604,12 @@ class BidDetectionOrchestrator:
             # === 扫描版 PDF：主路径是图片比对 ===
             logger.info(f"检测到扫描版 PDF: {filename} ({page_count} 页)")
 
-            # 提取页级图片哈希（主要特征）
-            all_page_hashes = self.extractor.extract_all_page_hashes(
-                file_path, sample_step=2
-            )
-            logger.info(
-                f"  页面哈希提取完成: {len(all_page_hashes)} 个哈希 "
-                f"({page_count} 页, 每 2 页采样 1 次)"
-            )
-
             # 为扫描版创建一个"虚拟块"来存储图片哈希
             # 同时尝试提取少量文本（扫描版可能也有部分文本层）
             chunks = []
             for chunk_result in self.extractor.extract_chunks(
                 file_path, self.config.CHUNK_PAGE_SIZE, 0
             ):
-                chunk_result.image_hashes = all_page_hashes
                 self.cache.store_chunk(chunk_result)
                 chunks.append(chunk_result)
 
@@ -633,10 +623,6 @@ class BidDetectionOrchestrator:
                     is_scanned=True,
                     page_count=page_count,
                 )
-                # 确保页级图片哈希被记录
-                feature.image_hashes = list(set(
-                    feature.image_hashes + all_page_hashes
-                ))
                 self.cache.store_document(feature)
                 # 扫描版 PDF：OCR 是必须的（提取文字用于后续文本比对）
                 ocr_count = self._phase1_ocr_pages(
@@ -648,7 +634,7 @@ class BidDetectionOrchestrator:
                 )
                 logger.info(
                     f"Phase 1 完成 (扫描版): {filename} "
-                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
+                    f"({page_count} 页, "
                     f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
                 # 提取联系人指纹
@@ -672,7 +658,7 @@ class BidDetectionOrchestrator:
                     metadata=metadata,
                     quotes=[],
                     quote_signature=QuoteSignature(),
-                    image_hashes=all_page_hashes,
+                    image_hashes=[],
                     is_scanned=True,
                     page_count=page_count,
                     doc_minhash=None,
@@ -688,7 +674,7 @@ class BidDetectionOrchestrator:
                 )
                 logger.info(
                     f"Phase 1 完成 (纯扫描版): {filename} "
-                    f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
+                    f"({page_count} 页, "
                     f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
                 # 提取联系人指纹
