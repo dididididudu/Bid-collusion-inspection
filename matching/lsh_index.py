@@ -158,9 +158,11 @@ class ParagraphLevelLSH:
             return mh_cache[key_str]
 
         for para in paras_b:
-            minhash_str = para.get('minhash', '')
-            if not minhash_str:
+            raw = para.get('minhash', '')
+            if not raw:
                 continue
+            # 确保 minhash 是字符串（数据库可能返回整数）
+            minhash_str = str(raw) if not isinstance(raw, str) else raw
             values = [int(v) for v in minhash_str.split(',')]
             if len(values) < self.num_perm:
                 continue
@@ -175,9 +177,10 @@ class ParagraphLevelLSH:
         candidates = {}
 
         for para in paras_a:
-            minhash_str = para.get('minhash', '')
-            if not minhash_str:
+            raw = para.get('minhash', '')
+            if not raw:
                 continue
+            minhash_str = str(raw) if not isinstance(raw, str) else raw
             values = [int(v) for v in minhash_str.split(',')]
             if len(values) < self.num_perm:
                 continue

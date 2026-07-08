@@ -5,6 +5,9 @@
 每个 worker 创建自己的 SQLite 连接，WAL 模式 + busy_timeout 处理写冲突。
 """
 
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
+warnings.filterwarnings('ignore', category=UserWarning, module='jieba')
 import os
 import logging
 from typing import List, Dict
@@ -322,6 +325,9 @@ def extract_single_worker(args: tuple) -> dict:
     finally:
         if cache:
             cache.close()
+            for attr in ['cache', 'doc_cache', 'matcher']:
+                if hasattr(_tls, attr):
+                    delattr(_tls, attr)
 
 
 # ================================================================
@@ -374,6 +380,9 @@ def embed_single_worker(args: tuple) -> dict:
     finally:
         if cache:
             cache.close()
+            for attr in ['cache', 'doc_cache', 'matcher']:
+                if hasattr(_tls, attr):
+                    delattr(_tls, attr)
 
 
 # ================================================================
@@ -466,12 +475,18 @@ def analyze_pair_worker(args: tuple) -> dict:
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
                 return {"pair_id": pair_id, "success": True,
-                        "match_count": 0, "error": ""}
+                        "match_count": 0, "clone_block_count": 0,
+                        "text_similarity": 0.0,
+                        "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                        "error": ""}
             else:
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
                 return {"pair_id": pair_id, "success": True,
-                        "match_count": 0, "error": ""}
+                        "match_count": 0, "clone_block_count": 0,
+                        "text_similarity": 0.0,
+                        "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                        "error": ""}
 
         # 正常文本分析路径
         paragraph_matches = matcher.match(doc_a, doc_b, cache)
@@ -503,8 +518,13 @@ def analyze_pair_worker(args: tuple) -> dict:
         cache.mark_pair_processed(doc_a_id, doc_b_id)
         cache.conn.commit()
 
+        clone_block_count = len(text_evidence.continuous_clone_blocks) if hasattr(text_evidence, 'continuous_clone_blocks') else 0
         return {"pair_id": pair_id, "success": True,
-                "match_count": len(paragraph_matches), "error": ""}
+                "match_count": len(paragraph_matches),
+                "clone_block_count": clone_block_count,
+                "text_similarity": text_evidence.local_similarity,
+                "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                "error": ""}
 
     except Exception as e:
         logger.error(f"[Analyze Worker] 失败 ({pair_id}): {e}", exc_info=True)
@@ -519,6 +539,9 @@ def analyze_pair_worker(args: tuple) -> dict:
     finally:
         if cache:
             cache.close()
+            for attr in ['cache', 'doc_cache', 'matcher']:
+                if hasattr(_tls, attr):
+                    delattr(_tls, attr)
 
 
 def _build_text_evidence_basic(

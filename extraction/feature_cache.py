@@ -694,7 +694,9 @@ class DocumentCache:
             if tokens_raw:
                 try: tokens = _json.loads(tokens_raw)
                 except: pass
-            result[idx] = {'minhash': mh or '', 'text': text or '',
+            # 确保 minhash 为字符串（数据库列是 TEXT 但可能返回整数）
+            mh_str = str(mh) if mh is not None else ''
+            result[idx] = {'minhash': mh_str, 'text': text or '',
                            'tokens': tokens, 'source': source or 'text',
                            'page_num': page_num if page_num is not None else -1}
         return result
@@ -1327,6 +1329,9 @@ class DocumentCache:
         从 paragraphs 表中加载段落文本和页码，然后使用 difflib 计算
         【】高亮标记文本和共同文本片段。
 
+        优化：文本/页码全量填充，但 difflib 高亮只算相似度最高的前 MAX_HIGHLIGHT_MATCHES 个，
+        其余段落只展示原始文本（不计算高亮）。
+
         此方法原地修改 para_matches 列表中的每个字典。
         """
         if not para_matches:
@@ -1355,7 +1360,13 @@ class DocumentCache:
             if 'page_num_b' not in match or match.get('page_num_b', -2) == -2:
                 match['page_num_b'] = pages_b.get(idx_b, -1)
 
-            # 计算高亮文本和共同部分
+        # 只对相似度最高的前 MAX_HIGHLIGHT_MATCHES 个匹配计算 difflib 高亮
+        max_highlight = getattr(self.config, 'REPORT_HIGHLIGHT_MAX', 500) if self.config else 500
+        # 按相似度降序排列，取 top-K
+        sorted_matches = sorted(para_matches, key=lambda m: m.get('similarity', 0), reverse=True)
+        for match in sorted_matches[:max_highlight]:
+            text_a = match.get('paragraph_a', '')
+            text_b = match.get('paragraph_b', '')
             if text_a and text_b:
                 hl_a, hl_b, common = compute_text_diff(text_a, text_b)
                 match['highlighted_text_a'] = hl_a

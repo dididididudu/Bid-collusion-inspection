@@ -30,6 +30,7 @@ from data_structures import (
 from extraction.feature_cache import DocumentCache
 from extraction.pdf_extractor import PyMuPDFExtractor
 from extraction.text_processor import ChunkedTextProcessor
+from extraction.contact_extractor import extract_contacts_from_sqlite
 from matching.selector import CandidatePairSelector
 from matching.paragraph_matcher import ParagraphMatcher
 from pipeline.checkpoint import CheckpointManager
@@ -54,8 +55,9 @@ class BidDetectionOrchestrator:
     # OCR 聚合段落的虚拟块索引（避免与正常文本块 0,1,2... 冲突）
     OCR_CHUNK_INDEX: int = 1000000
 
-    def __init__(self, config: DetectionConfig):
+    def __init__(self, config: DetectionConfig, progress_callback=None):
         self.config = config
+        self._progress_callback = progress_callback
 
         # 初始化缓存和检查点
         self.cache = DocumentCache(config.CACHE_DIR, config)
@@ -331,6 +333,10 @@ class BidDetectionOrchestrator:
                         (os.cpu_count() or 4) * 2,  # 线程可超过 CPU 数
                     )
 
+                    # 通知前端 Phase 3 开始及总对数
+                    if self._progress_callback:
+                        self._progress_callback({'phase_start': True, 'total_pairs': state.total_pairs})
+
                     if num_workers <= 1:
                         # === 串行路径 ===
                         for idx, (doc_a_id, doc_b_id) in enumerate(pending_pairs, 1):
@@ -340,6 +346,9 @@ class BidDetectionOrchestrator:
                                 pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
                                 completed_ids.add(pair_id)
                                 state.completed_pairs = len(completed_ids)
+                                # 更新进度（含总对数）
+                                if self._progress_callback:
+                                    self._progress_callback({'update_progress': True, 'current': idx, 'total': total_pending})
 
                                 if idx % 50 == 0 or idx == total_pending:
                                     logger.info(
@@ -397,6 +406,18 @@ class BidDetectionOrchestrator:
                                     if result.get('success', False):
                                         completed_ids.add(pair_id)
                                         state.completed_pairs = len(completed_ids)
+                                        # 进度回调
+                                        if self._progress_callback:
+                                            self._progress_callback({
+                                                'pair_id': pair_id,
+                                                'doc_a_id': doc_a_id,
+                                                'doc_b_id': doc_b_id,
+                                                'filename_a': result.get('filename_a', doc_a_id),
+                                                'filename_b': result.get('filename_b', doc_b_id),
+                                                'text_similarity': result.get('text_similarity', 0),
+                                                'match_count': result.get('match_count', 0),
+                                                'clone_count': result.get('clone_block_count', 0),
+                                            })
                                 except Exception as e:
                                     logger.error(
                                         f"分析 worker 异常 "
@@ -425,6 +446,10 @@ class BidDetectionOrchestrator:
                 state.phase = 5
                 state.completed_pairs = len(completed_ids)
                 self.checkpoint.save(state)
+
+                # 释放段落缓存，回收内存
+                self._phase3_para_cache.clear()
+                logger.debug("Phase 3 段落缓存已释放")
 
             # === Phase 4: SCORE ===
             report = None
@@ -626,6 +651,12 @@ class BidDetectionOrchestrator:
                     f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
                     f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
+                # 提取联系人指纹
+                try:
+                    fp = extract_contacts_from_sqlite(doc_id, self.cache)
+                    self.cache.store_contact_fingerprint(doc_id, fp.to_json())
+                except Exception:
+                    pass
             else:
                 # 完全没有文本，只存图片哈希
                 from data_structures import QuoteSignature
@@ -660,6 +691,12 @@ class BidDetectionOrchestrator:
                     f"({page_count} 页, {len(all_page_hashes)} 页面哈希, "
                     f"OCR: {ocr_count} 页, {ocr_para_count} 段)"
                 )
+                # 提取联系人指纹
+                try:
+                    fp = extract_contacts_from_sqlite(doc_id, self.cache)
+                    self.cache.store_contact_fingerprint(doc_id, fp.to_json())
+                except Exception:
+                    pass
             return
 
         # === 文本版 PDF：文本为主，图片为辅 ===
@@ -671,6 +708,12 @@ class BidDetectionOrchestrator:
 
         if start_page >= page_count and page_count > 0:
             logger.info(f"文档已完全提取: {filename}")
+            # 如之前提取时未存联系人指纹（旧版本 Bug），补充存储
+            try:
+                fp = extract_contacts_from_sqlite(doc_id, self.cache)
+                self.cache.store_contact_fingerprint(doc_id, fp.to_json())
+            except Exception:
+                pass
             return
 
         # 流式提取文本块（含嵌入图片和页级图片采样）
@@ -717,6 +760,13 @@ class BidDetectionOrchestrator:
             ocr_count = self._phase1_ocr_pages(
                 file_path, doc_id, page_count
             )
+
+            # 提取联系人指纹
+            try:
+                fp = extract_contacts_from_sqlite(doc_id, self.cache)
+                self.cache.store_contact_fingerprint(doc_id, fp.to_json())
+            except Exception:
+                pass
 
             logger.info(
                 f"Phase 1 完成: {filename} "
@@ -1107,6 +1157,15 @@ class BidDetectionOrchestrator:
             f"耗时 {embed_time:.2f}s"
         )
 
+    # Phase 3 段落数据缓存：避免同一文档在多对分析中重复从 SQLite 加载
+    _phase3_para_cache: Dict[str, Dict[int, dict]] = {}
+
+    def _get_para_full(self, doc_id: str) -> Dict[int, dict]:
+        """获取文档的段落全量数据（带 Phase 3 LRU 缓存）"""
+        if doc_id not in self._phase3_para_cache:
+            self._phase3_para_cache[doc_id] = self.cache.load_all_paragraphs_full(doc_id)
+        return self._phase3_para_cache[doc_id]
+
     def _phase3_analyze_single(self, doc_a_id: str, doc_b_id: str):
         """Phase 3: 分析单个文档对（流式加载文本）"""
         # 加载轻量特征
@@ -1149,7 +1208,9 @@ class BidDetectionOrchestrator:
             paragraph_matches = []
             if dims.get('content_similarity', True):
                 paragraph_matches = self.paragraph_matcher.match(
-                    doc_a, doc_b, self.cache
+                    doc_a, doc_b, self.cache,
+                    para_full_a=self._get_para_full(doc_a_id),
+                    para_full_b=self._get_para_full(doc_b_id),
                 )
 
             # 构建证据链（按维度门控）
@@ -1171,6 +1232,19 @@ class BidDetectionOrchestrator:
             # 存储结果
             self.cache.store_pairwise_result(result)
             self.cache.mark_pair_processed(doc_a_id, doc_b_id)
+
+            # 进度回调（实时推送前端）
+            if self._progress_callback:
+                self._progress_callback({
+                    'pair_id': pair_id,
+                    'doc_a_id': doc_a_id,
+                    'doc_b_id': doc_b_id,
+                    'filename_a': doc_a.filename,
+                    'filename_b': doc_b.filename,
+                    'text_similarity': evidence.text_evidence.local_similarity,
+                    'match_count': len(paragraph_matches),
+                    'clone_count': len(evidence.text_evidence.continuous_clone_blocks),
+                })
 
         finally:
             # 释放文档缓存
@@ -1362,9 +1436,9 @@ class BidDetectionOrchestrator:
         doc_b: BidFeature,
         paragraph_matches: List[Dict],
     ) -> TextEvidence:
-        """构建文本证据（委托 evidence_builder 复用）"""
+        """构建文本证据（Phase 3 跳过 difflib 高亮，留到报告阶段再算）"""
         return build_text_evidence(
-            doc_a, doc_b, paragraph_matches, self.config, compute_highlight=True
+            doc_a, doc_b, paragraph_matches, self.config, compute_highlight=False
         )
 
     def _detect_clone_blocks(self, paragraph_matches: List[Dict]) -> List[Dict]:

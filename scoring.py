@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class RiskScoringEngine:
-    """风险评分引擎（简化版：仅负责报告编排和聚类，不计算风险评分/等级）"""
+    """报告引擎"""
 
     def __init__(self, config: DetectionConfig):
         self.config = config

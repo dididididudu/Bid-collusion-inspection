@@ -37,14 +37,22 @@ class ParagraphMatcher:
         doc_a: BidFeature,
         doc_b: BidFeature,
         cache: DocumentCache,
+        para_full_a: Dict[int, dict] = None,
+        para_full_b: Dict[int, dict] = None,
     ) -> List[Dict]:
         """Execute three-stage paragraph matching
 
+        Args:
+            para_full_a/b: 可选的预加载段落数据。传入后可跳过 cache 查询，
+                           避免同一文档在多个配对中重复从 SQLite 加载。
+
         Returns matches sorted by similarity descending.
         """
-        # 一次性加载全部段落数据（minhash + text + tokens + source）
-        para_full_a = cache.load_all_paragraphs_full(doc_a.doc_id)
-        para_full_b = cache.load_all_paragraphs_full(doc_b.doc_id)
+        # 使用调用方传入的预加载段落数据，避免重复 SQLite 查询
+        if para_full_a is None:
+            para_full_a = cache.load_all_paragraphs_full(doc_a.doc_id)
+        if para_full_b is None:
+            para_full_b = cache.load_all_paragraphs_full(doc_b.doc_id)
 
         minhashes_a = {k: v['minhash'] for k, v in para_full_a.items() if v['minhash']}
         minhashes_b = {k: v['minhash'] for k, v in para_full_b.items() if v['minhash']}
@@ -149,8 +157,8 @@ class ParagraphMatcher:
                             'page_num_a': para_full_a.get(i, {}).get('page_num', -1),
                             'page_num_b': para_full_b.get(j, {}).get('page_num', -1),
                             'detection_method': 'Exact-Jaccard',
-                            'paragraph_a': text_a,
-                            'paragraph_b': text_b,
+                            'paragraph_a': para_texts_a.get(i, ''),
+                            'paragraph_b': para_texts_b.get(j, ''),
                             'is_continuous_clone': False,
                             'continuous_clone_group_id': '',
                             'highlighted_text_a': '',
@@ -267,6 +275,23 @@ class ParagraphMatcher:
         indices_a = list(minhashes_a.keys())
         indices_b = list(minhashes_b.keys())
 
+        if not indices_a or not indices_b:
+            return []
+
+        # 确保所有 minhash 值是字符串（数据库可能返回非字符串类型）
+        for k, v in list(minhashes_a.items()):
+            if not isinstance(v, str):
+                minhashes_a[k] = str(v)
+            elif not v:
+                del minhashes_a[k]
+        for k, v in list(minhashes_b.items()):
+            if not isinstance(v, str):
+                minhashes_b[k] = str(v)
+            elif not v:
+                del minhashes_b[k]
+
+        indices_a = list(minhashes_a.keys())
+        indices_b = list(minhashes_b.keys())
         if not indices_a or not indices_b:
             return []
 

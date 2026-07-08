@@ -105,18 +105,25 @@ class SemanticMatcher:
             self._model = None
 
     def _load_sbert_model(self):
-        """加载原始 SBERT 模型"""
+        """加载原始 SBERT 模型（优先本地缓存，失败后再尝试在线）"""
+        local_only = os.environ.get('TRANSFORMERS_OFFLINE', '') == '1'
+
+        # 先尝试离线加载（速度快，不依赖网络）
         try:
-            local_only = os.environ.get('TRANSFORMERS_OFFLINE', '') == '1'
             self._model = SentenceTransformer(
                 'paraphrase-multilingual-MiniLM-L12-v2',
                 device=self.device,
                 cache_folder='./models',
                 trust_remote_code=True,
-                local_files_only=local_only,
+                local_files_only=True,
             )
-        except Exception:
-            # 尝试在线加载
+            logger.info(f"SBERT 模型离线加载完成 ({self.device})")
+            return
+        except Exception as e:
+            logger.debug(f"SBERT 离线加载失败，尝试在线: {e}")
+
+        # 回退：在线加载
+        if not local_only:
             try:
                 self._model = SentenceTransformer(
                     'paraphrase-multilingual-MiniLM-L12-v2',
@@ -125,9 +132,12 @@ class SemanticMatcher:
                     trust_remote_code=True,
                     local_files_only=False,
                 )
+                logger.info(f"SBERT 模型在线加载完成 ({self.device})")
+                return
             except Exception as e:
                 logger.error(f"SBERT 在线加载也失败: {e}")
-                self._model = None
+
+        self._model = None
 
     def _load_onnx_model(self):
         """加载 ONNX 优化模型"""

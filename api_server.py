@@ -10,6 +10,9 @@ FastAPI 服务 — 投标文件串标围标检测
     GET  /api/detect/{task_id} 查询任务状态和结果
     GET  /api/dimensions      查询可用检测维度
 """
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
+warnings.filterwarnings('ignore', category=UserWarning, module='jieba')
 import os
 import sys
 import json
@@ -24,7 +27,7 @@ from typing import Optional, List
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 
 # 项目根目录
@@ -85,12 +88,20 @@ async def preload_models():
     logger.info("=" * 50)
     logger.info("正在预加载模型...")
 
-    logger.info("[1/2] 加载 SBERT 语义模型...")
+    logger.info("[1/2] 加载 SBERT 语义模型（优先本地缓存）...")
     try:
-        model = _get_global_sbert()
-        logger.info(f"  SBERT {'加载完成' if model else '加载失败'}")
+        # 先试离线（模型已下载过则瞬间完成）
+        from sentence_transformers import SentenceTransformer
+        _ = SentenceTransformer(
+            'paraphrase-multilingual-MiniLM-L12-v2',
+            device='cpu', cache_folder='./models',
+            trust_remote_code=True, local_files_only=True,
+        )
+        logger.info("  SBERT 离线加载完成")
+        _global_sbert_model = _
     except Exception as e:
-        logger.warning(f"  SBERT 加载异常: {e}")
+        logger.warning(f"  SBERT 本地加载失败（首次运行需要联网下载）: {e}")
+        logger.info("  SBERT 将在 Phase 1.5 按需加载")
 
     logger.info("[2/2] 加载 OCR 引擎 (EasyOCR)...")
     try:
@@ -157,19 +168,40 @@ class TaskRecord:
         self.completed_at = None
         self.elapsed_seconds = 0
         self.work_dir = os.path.join(WORK_DIR, task_id)
+        self.output_dir = None  # 报告输出目录（PDF下载用）
+        # 增量结果支持
+        self.partial_results = []
+        self._lock = threading.Lock()
+
+    def add_partial_result(self, data: dict):
+        """线程安全地添加一条增量结果"""
+        with self._lock:
+            self.partial_results.append(data)
+
+    def update_progress(self, phase: str, current: int, total: int):
+        """线程安全地更新进度"""
+        with self._lock:
+            self.progress = {"phase": phase, "current": current, "total": total}
 
     def to_dict(self):
-        return {
+        base = {
             "task_id": self.task_id,
             "status": self.status,
             "progress": self.progress,
-            "result": self.result,
             "error": self.error,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "elapsed_seconds": self.elapsed_seconds,
             "content_similarity": self.content_similarity,
         }
+        if self.status == "completed":
+            base["result"] = self.result
+            base["report_url"] = f"/api/detect/{self.task_id}/report"
+        if self.status == "processing":
+            # 处理中：返回已完成的部分结果
+            with self._lock:
+                base["partial_results"] = list(self.partial_results)
+        return base
 
 
 # ============================================================
@@ -233,7 +265,23 @@ def _run_detection_impl(task_id: str):
         output_dir = os.path.join(record.work_dir, "output")
 
         t0 = time.time()
-        orchestrator = BidDetectionOrchestrator(config)
+
+        # 进度回调：Phase 3 每分析完一对就推送到 TaskRecord
+        _pair_count = [0]
+        def _on_progress(data: dict):
+            if data.get('phase_start'):
+                # Phase 3 启动通知：记录总对数
+                record.update_progress("Phase 3: 段落分析", 0, data.get('total_pairs', 0))
+                return
+            if data.get('update_progress'):
+                # 纯进度更新（串行路径）
+                record.update_progress("Phase 3: 段落分析", data['current'], data['total'])
+                return
+            # 真实的配对完成结果
+            _pair_count[0] += 1
+            record.add_partial_result(data)
+
+        orchestrator = BidDetectionOrchestrator(config, progress_callback=_on_progress)
 
         if record.content_similarity and _global_sbert_model is not None:
             try:
@@ -267,6 +315,14 @@ def _run_detection_impl(task_id: str):
         record.elapsed_seconds = round(elapsed, 2)
         record.status = "completed"
         record.completed_at = datetime.now().isoformat()
+        record.output_dir = output_dir
+
+        # 清理缓存和检查点目录（保留 output 目录供 PDF 下载）
+        for subdir in ['cache', 'checkpoints', 'input']:
+            path = os.path.join(record.work_dir, subdir)
+            if os.path.exists(path):
+                import shutil
+                shutil.rmtree(path, ignore_errors=True)
 
     except Exception as e:
         logger.exception(f"检测任务失败: {task_id}")
@@ -274,9 +330,8 @@ def _run_detection_impl(task_id: str):
         record.error = str(e)
         record.completed_at = datetime.now().isoformat()
     finally:
-        import shutil
-        if record and record.work_dir and os.path.exists(record.work_dir):
-            shutil.rmtree(record.work_dir, ignore_errors=True)
+        # 不再清理 work_dir，留给定时任务清理（1小时后自动删除）
+        pass
 
 
 def _build_dimension_hits(report, config):
@@ -410,6 +465,46 @@ async def get_detection_result(task_id: str):
         raise HTTPException(status_code=404, detail="任务不存在")
 
     return record.to_dict()
+
+
+@app.get("/api/detect/{task_id}/report")
+async def download_report(task_id: str):
+    """下载检测报告 PDF"""
+    from fastapi.responses import FileResponse
+
+    with _lock:
+        record = _tasks.get(task_id)
+
+    if not record:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if record.status != "completed":
+        raise HTTPException(status_code=400, detail="任务尚未完成")
+    if not record.output_dir:
+        raise HTTPException(status_code=404, detail="报告文件未找到")
+
+    pdf_path = os.path.join(record.output_dir, "detection_report.pdf")
+    json_path = os.path.join(record.output_dir, "detection_report.json")
+
+    # 默认返回 PDF，支持 ?format=json
+    fmt = os.environ.get('REQUEST_QUERY', '')  # 会被 query param 覆盖
+    if not fmt:
+        fmt = ''  # 由 FastAPI 的 query 参数接管
+
+    # 用路径判断：PDF 存在则优先返回 PDF
+    if os.path.exists(pdf_path):
+        return FileResponse(
+            pdf_path,
+            media_type='application/pdf',
+            filename='detection_report.pdf',
+        )
+    elif os.path.exists(json_path):
+        return FileResponse(
+            json_path,
+            media_type='application/json',
+            filename='detection_report.json',
+        )
+    else:
+        raise HTTPException(status_code=404, detail="报告文件不存在")
 
 
 @app.get("/api/health")

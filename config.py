@@ -51,7 +51,7 @@ class DetectionConfig:
     PARAGRAPH_LSH_THRESHOLD: float = 0.3
     PARAGRAPH_MATCH_STAGE1_TOP_K: int = 5000
     PARAGRAPH_MATCH_STAGE2_TOP_K: int = 10000
-    PARAGRAPH_MIN_JACCARD: float = 0.05
+    PARAGRAPH_MIN_JACCARD: float = 0.10
     MAX_CANDIDATE_PAIRS: int = 5000
 
     # ── 流式 / 存储 ──
@@ -113,6 +113,7 @@ class DetectionConfig:
     REPORT_MAX_MATCHES_PER_PAIR: int = 10000
     REPORT_INCLUDE_ALL_MATCHES: bool = True
     REPORT_DETAIL_LEVEL: str = "full"
+    REPORT_HIGHLIGHT_MAX: int = 500        # difflib 高亮计算的最大匹配对数（减少 Phase 4 耗时）
 
     # ── 检测维度开关（前端可勾选）──
     # content_similarity 控制文本+图片（重操作），其余轻量维度始终运行不消耗时间

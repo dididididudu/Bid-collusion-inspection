@@ -123,12 +123,11 @@ class PyMuPDFExtractor(BasePDFExtractor):
             # 提取 PDF 文件唯一标识码（/ID[0]）
             file_id = ""
             try:
-                trailer = doc.pdf_trailer()
-                id_key = doc.xref_get_key(trailer, "ID")
-                if id_key and id_key[0] == 'array' and id_key[1]:
-                    # 格式: '[<ABC...> <DEF...>]'，取第一个
-                    parts = id_key[1].strip('[]').split()
-                    file_id = parts[0].strip('<>') if parts else ""
+                trailer_str = doc.pdf_trailer()  # 返回 PDF 语法字符串
+                import re as _re
+                m = _re.search(r'/ID\s*\[\s*<([^>]+)>', trailer_str)
+                if m:
+                    file_id = m.group(1)
             except Exception:
                 pass
 
@@ -206,6 +205,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 # 按页分段 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
                 # 与旧版不同：逐页分段，记录每段的页码
                 paragraphs = []
+                paragraph_hashes = []
                 paragraph_page_nums = []
                 paragraph_tokens = []
                 chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
@@ -551,7 +551,8 @@ class PyMuPDFExtractor(BasePDFExtractor):
             if merged_lines and merged_lines[-1] and merged_lines[-1] != '':
                 prev = merged_lines[-1]
                 if (re.search(r'[一-鿿　-〿＀-￯]', prev[-1]) and
-                        re.search(r'^[一-鿿]', line_stripped)):
+                        re.search(r'^[一-鿿]', line_stripped) and
+                        prev[-1] not in '。！？；：'):  # 不跨句合并
                     merged_lines[-1] = prev + line_stripped
                     continue
                 if (prev[-1] not in '。！？；：》」』)"]' and
@@ -564,9 +565,9 @@ class PyMuPDFExtractor(BasePDFExtractor):
 
         merged_text = '\n'.join(merged_lines)
 
-        # 第2步：双换行粗切
-        raw_chunks = re.split(r'\n\s*\n', merged_text)
-        raw_chunks = [p.strip() for p in raw_chunks if len(p.strip()) > 15]
+        # 第2步：按换行粗切（行合并后每行是一个语义块）
+        raw_chunks = re.split(r'\n', merged_text)
+        raw_chunks = [p.strip() for p in raw_chunks if len(p.strip()) > 10]
 
         # 第3步：对每个粗切块做句子级细切
         final_sentences = []
@@ -574,19 +575,19 @@ class PyMuPDFExtractor(BasePDFExtractor):
             if len(chunk) > 500:
                 subs = self._sentence_boundary_fine(chunk)
                 final_sentences.extend(subs)
-            elif len(chunk) > 15:
+            elif len(chunk) > 10:
                 final_sentences.append(chunk)
 
-        # 第4步：如果句子太少，强制全文句子级切分
-        if len(final_sentences) <= 3:
+        # 第4步：如果段落太少，强制按原始文本句子级切分
+        if len(final_sentences) <= 1:
             final_sentences = self._sentence_boundary_fine(text)
 
         if not final_sentences and len(text.strip()) > 15:
             final_sentences = [text.strip()]
 
         # 第5步：合并连续短段（解决 Word→PDF 换行切碎问题）
-        # 连续长度 < 50 字符的段落合并为一段，避免因换行位置不同导致匹配失败
-        MERGE_THRESHOLD = 50
+        # 仅合并极短的碎片段（< 25 字符），保留有意义的短段落
+        MERGE_THRESHOLD = 25
         merged = []
         buffer = ""
         for p in final_sentences:

@@ -299,6 +299,9 @@ def extract_contacts_from_text(full_text: str) -> ContactFingerprint:
 def extract_contacts_from_sqlite(doc_id: str, cache) -> ContactFingerprint:
     """从 SQLite 缓存中加载文档全文并提取联系人指纹
 
+    使用 chunks 表的完整文本（压缩存储），而非 paragraphs 表的分段文本，
+    避免短字段（联系人、电话等）被段落分割过滤掉。
+
     Args:
         doc_id: 文档 ID
         cache: DocumentCache 实例
@@ -306,10 +309,25 @@ def extract_contacts_from_sqlite(doc_id: str, cache) -> ContactFingerprint:
     Returns:
         ContactFingerprint 对象
     """
-    # 从 chunks 表拼接全文（已有压缩存储，按需解压）
     try:
-        paragraphs = cache.load_all_paragraphs_text(doc_id)
-        full_text = '\n'.join(paragraphs) if paragraphs else ''
+        # 从 chunks 表加载完整文本（按 chunk_index 拼接）
+        full_text = ''
+        cursor = cache.conn.execute(
+            "SELECT chunk_index FROM chunks WHERE doc_id = ? ORDER BY chunk_index",
+            (doc_id,)
+        )
+        chunk_indices = [row[0] for row in cursor.fetchall()]
+        if not chunk_indices:
+            # 回退：从 paragraphs 表加载
+            paragraphs = cache.load_all_paragraphs_text(doc_id)
+            full_text = '\n'.join(paragraphs) if paragraphs else ''
+        else:
+            texts = []
+            for ci in chunk_indices:
+                chunk_text = cache.load_chunk_text(doc_id, ci)
+                if chunk_text:
+                    texts.append(chunk_text)
+            full_text = '\n'.join(texts)
     except Exception:
         logger.warning(f"无法加载文档 {doc_id} 的段落文本")
         full_text = ''
