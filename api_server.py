@@ -310,6 +310,7 @@ def _run_detection_impl(task_id: str):
             "total_pairs": report.total_pairs,
             "suspicious_pairs": report.suspicious_pairs,
             "dimensions": dims,
+            "metadata_groups": report_dict.get("metadata_groups", []),  # ★ 聚合组
             "pairwise_results": report_dict.get("pairwise_results", []),
         }
         record.elapsed_seconds = round(elapsed, 2)

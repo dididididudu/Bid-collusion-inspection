@@ -2,13 +2,13 @@
 模块 D：风险评级与聚类引擎（简化版 — 仅报告编排，不评分）
 """
 import logging
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from collections import defaultdict, deque
 import uuid
 
 from data_structures import (
     BidFeature, PairwiseResult, GlobalReport,
-    Cluster, FileProfile
+    Cluster, FileProfile, MetadataGroup,
 )
 from config import DetectionConfig
 
@@ -34,10 +34,13 @@ class RiskScoringEngine:
         # 2. 风险聚类
         risk_clusters = self._cluster_risks(pairwise_results, features)
 
-        # 3. 生成单文档画像
+        # ★ 3. 元数据聚合组（取代冗余的 pairwise 展示）
+        metadata_groups = self._build_metadata_groups(pairwise_results, features)
+
+        # 4. 生成单文档画像
         file_profiles = self._generate_file_profiles(pairwise_results, features)
 
-        # 4. 生成报告
+        # 5. 生成报告
         from datetime import datetime
         report = GlobalReport(
             report_id=str(uuid.uuid4()),
@@ -48,13 +51,15 @@ class RiskScoringEngine:
             suspicious_pairs=len(suspicious_pairs),
             high_risk_pairs=0,  # 不再区分高风险
             risk_clusters=risk_clusters,
+            metadata_groups=metadata_groups,  # ★
             pairwise_results=pairwise_results,
             file_profiles=file_profiles
         )
 
         logger.info(
             f"报告生成完成: {len(suspicious_pairs)} 对有雷同项, "
-            f"{len(risk_clusters)} 个风险聚类"
+            f"{len(risk_clusters)} 个风险聚类, "
+            f"{len(metadata_groups)} 个元数据聚合组"
         )
         return report
 
@@ -163,6 +168,124 @@ class RiskScoringEngine:
             return "META_GROUP"
         else:
             return "TEXT_CLONE"
+
+    def _build_metadata_groups(
+        self,
+        pairwise_results: List[PairwiseResult],
+        features: List[BidFeature],
+    ) -> List[MetadataGroup]:
+        """从 pairwise 结果中聚合元数据组
+
+        元数据雷同是传递性的：A↔B 作者相同 + B↔C 作者相同 → A、B、C 作者相同。
+        当前 pairwise 展示有 N×(N-1)/2 条冗余，聚合成一条组更清晰。
+
+        聚合策略：
+        - 值相同型（author、creator、contact 等）：以 field+value 为 key 收集文档
+        - 连通型（file_id）：通过同 file_id 子图的连通分量聚合
+        """
+        from collections import defaultdict
+
+        filename_map = {f.doc_id: f.filename for f in features}
+
+        # 值相同型：(group_type, value) → set[doc_id]
+        value_groups: Dict[tuple, Set[str]] = defaultdict(set)
+
+        # 连通型：same_file_id 子图
+        file_id_graph: Dict[str, Set[str]] = defaultdict(set)
+        file_id_docs: Set[str] = set()
+
+        for r in pairwise_results:
+            ev = r.evidence
+
+            # ── 元数据证据（author / creator / producer / software_fingerprint）──
+            me = ev.metadata_evidence
+            for field in me.matched_fields:
+                val = me.matched_values.get(field, '').strip()
+                if not val:
+                    continue
+                if field == 'author':
+                    gt = 'author'
+                elif field in ('creator', 'producer', 'software_fingerprint'):
+                    gt = 'editor'
+                else:
+                    gt = field
+                value_groups[(gt, val)].add(r.doc_a_id)
+                value_groups[(gt, val)].add(r.doc_b_id)
+
+            # ── 文件码雷同（连通型）──
+            if me.same_file_id:
+                file_id_graph[r.doc_a_id].add(r.doc_b_id)
+                file_id_graph[r.doc_b_id].add(r.doc_a_id)
+                file_id_docs.add(r.doc_a_id)
+                file_id_docs.add(r.doc_b_id)
+
+            # ── 联系人雷同（值相同型）──
+            ce = ev.contact_evidence
+            for v in ce.common_mobiles:
+                value_groups[('contact_mobile', v)].update([r.doc_a_id, r.doc_b_id])
+            for v in ce.common_emails:
+                value_groups[('contact_email', v)].update([r.doc_a_id, r.doc_b_id])
+            for v in ce.common_contacts:
+                value_groups[('contact_name', v)].update([r.doc_a_id, r.doc_b_id])
+            for v in ce.common_companies:
+                value_groups[('company_name', v)].update([r.doc_a_id, r.doc_b_id])
+            for v in ce.common_credit_codes:
+                value_groups[('credit_code', v)].update([r.doc_a_id, r.doc_b_id])
+
+        # ── 构建 MetadataGroup（值相同型）──
+        groups: List[MetadataGroup] = []
+        for (gt, val), doc_ids in value_groups.items():
+            if len(doc_ids) < 2:
+                continue
+            dids_sorted = sorted(doc_ids)
+            groups.append(MetadataGroup(
+                group_type=gt,
+                shared_value=val,
+                doc_ids=dids_sorted,
+                doc_count=len(dids_sorted),
+                filenames=[filename_map.get(d, d) for d in dids_sorted],
+            ))
+
+        # ── 构建 MetadataGroup（文件码 — 连通分量）──
+        if file_id_docs:
+            doc_id_to_file_id = {
+                f.doc_id: f.metadata.file_id
+                for f in features if f.metadata.file_id
+            }
+            visited: Set[str] = set()
+            for start in file_id_docs:
+                if start in visited:
+                    continue
+                # BFS 找连通分量
+                component: Set[str] = set()
+                queue = [start]
+                visited.add(start)
+                while queue:
+                    node = queue.pop(0)
+                    component.add(node)
+                    for nb in file_id_graph.get(node, []):
+                        if nb not in visited:
+                            visited.add(nb)
+                            queue.append(nb)
+                if len(component) < 2:
+                    continue
+                dids_sorted = sorted(component)
+                # 取任一个文档的 file_id 值
+                file_id_val = ''
+                for d in dids_sorted:
+                    if d in doc_id_to_file_id:
+                        file_id_val = doc_id_to_file_id[d]
+                        break
+                groups.append(MetadataGroup(
+                    group_type='file_id',
+                    shared_value=file_id_val or '相同文件码',
+                    doc_ids=dids_sorted,
+                    doc_count=len(dids_sorted),
+                    filenames=[filename_map.get(d, d) for d in dids_sorted],
+                ))
+
+        logger.info(f"构建了 {len(groups)} 个元数据聚合组")
+        return groups
 
     def _generate_file_profiles(
         self,

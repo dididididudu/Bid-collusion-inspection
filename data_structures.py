@@ -283,6 +283,20 @@ class FileProfile:
 
 
 @dataclass
+class MetadataGroup:
+    """元数据聚合组 — 多文档共享同一元数据值的聚合
+
+    取代单对展示，将 N×(N-1)/2 条冗余对聚合成一条组。
+    例如：4 个文档作者相同，只显示一条"作者 yuhang 董：DocA、DocB…"。
+    """
+    group_type: str  # "author" | "file_id" | "editor" | "contact_mobile" | "contact_email" | "contact_name" | "company_name" | "credit_code"
+    shared_value: str  # 共享的值，如 "yuhang 董"、"13800138000"
+    doc_ids: List[str]  # 共享此值的文档 ID 列表
+    doc_count: int  # 文档数量
+    filenames: List[str] = field(default_factory=list)  # 方便展示的文档名
+
+
+@dataclass
 class GlobalReport:
     """全局检测报告"""
     report_id: str
@@ -294,6 +308,7 @@ class GlobalReport:
     high_risk_pairs: int
     risk_clusters: List[Cluster] = field(default_factory=list)
     pairwise_results: List[PairwiseResult] = field(default_factory=list)
+    metadata_groups: List[MetadataGroup] = field(default_factory=list)  # ★ 元数据聚合组
     file_profiles: Dict[str, FileProfile] = field(default_factory=dict)
     error_log: List[str] = field(default_factory=list)
     single_doc_risks: Dict[str, str] = field(default_factory=dict)  # 单文档风险等级

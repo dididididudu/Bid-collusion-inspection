@@ -157,23 +157,80 @@ def _cover(story,s,report):
 # ================================================================
 # 简单维度
 # ================================================================
-def _sd(story,s,dk,dt,pairs,profiles):
-    story.append(Paragraph(dt,s['section']))
-    story.append(Table([['']],colWidths=[40*mm],rowHeights=[2]))
-    story[-1].setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),C_PRIMARY)]))
-    story.append(Spacer(1,4*mm))
-    for pair in pairs:
-        fa=_esc(getattr(profiles.get(pair.doc_a_id,{}),'filename',pair.doc_a_id))
-        fb=_esc(getattr(profiles.get(pair.doc_b_id,{}),'filename',pair.doc_b_id))
-        details=_dim_detail(pair,dk)
-        cd=[[Paragraph(f'<b>{fa}</b> ↔ <b>{fb}</b>',s['pair_h'])]]
-        for det in details:
-            cd.append([Paragraph(f'<font color="{C_RISK_HIGH.hexval()}">●</font> {_esc(det)}',s['body'])])
-        card=Table(cd,colWidths=[PG_W],hAlign='CENTER')
-        card.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),C_BG),('TOPPADDING',(0,0),(-1,0),3*mm),('BOTTOMPADDING',(0,-1),(-1,-1),3*mm),
-            ('LEFTPADDING',(0,0),(-1,-1),4*mm),('RIGHTPADDING',(0,0),(-1,-1),4*mm),('LINEBELOW',(0,0),(-1,0),0.5,C_BORDER)]))
-        story.append(KeepTogether(card)); story.append(Spacer(1,3*mm))
-    story.append(Spacer(1,6*mm))
+def _sd(story, s, dk, dt, pairs, profiles, groups=None):
+    """维度展示 — 优先展示聚合组，无组时降级为 pairwise"""
+    story.append(Paragraph(dt, s['section']))
+    story.append(Table([['']], colWidths=[40 * mm], rowHeights=[2]))
+    story[-1].setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), C_PRIMARY)]))
+    story.append(Spacer(1, 4 * mm))
+
+    if groups:
+        # ── 聚合组展示 ──
+        _render_metadata_groups(story, s, dk, groups)
+    else:
+        # ── 降级：pairwise 展示 ──
+        for pair in pairs:
+            fa = _esc(getattr(profiles.get(pair.doc_a_id, {}), 'filename', pair.doc_a_id))
+            fb = _esc(getattr(profiles.get(pair.doc_b_id, {}), 'filename', pair.doc_b_id))
+            details = _dim_detail(pair, dk)
+            cd = [[Paragraph(f'<b>{fa}</b> ↔ <b>{fb}</b>', s['pair_h'])]]
+            for det in details:
+                cd.append([Paragraph(f'<font color="{C_RISK_HIGH.hexval()}">●</font> {_esc(det)}', s['body'])])
+            card = Table(cd, colWidths=[PG_W], hAlign='CENTER')
+            card.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), C_BG),
+                ('TOPPADDING', (0, 0), (-1, 0), 3 * mm),
+                ('BOTTOMPADDING', (0, -1), (-1, -1), 3 * mm),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4 * mm),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4 * mm),
+                ('LINEBELOW', (0, 0), (-1, 0), 0.5, C_BORDER),
+            ]))
+            story.append(KeepTogether(card))
+            story.append(Spacer(1, 3 * mm))
+
+    story.append(Spacer(1, 6 * mm))
+
+
+def _render_metadata_groups(story, s, dk, groups):
+    """渲染元数据聚合组 — 一组共享同一个值的文档聚合成一条"""
+    # 维度标签映射
+    label_map = {
+        'author': '文档作者',
+        'file_id': '文件码',
+        'editor': '编辑经办人',
+        'contact_mobile': '联系电话',
+        'contact_email': '电子邮箱',
+        'contact_name': '联系人',
+        'company_name': '公司名称',
+        'credit_code': '信用代码',
+    }
+    # 如果 dk 是顶层维度名且 groups 包含子类型，自动按子类型取标签
+    sub_type_labels = {
+        'contact_mobile': '联系电话',
+        'contact_email': '电子邮箱',
+        'contact_name': '联系人',
+    }
+
+    for g in groups:
+        filenames = '、'.join(_esc(fn) for fn in (g.filenames or g.doc_ids))
+        # 确定实际标签：优先用子类型标签，其次用 dk 映射
+        actual_label = sub_type_labels.get(g.group_type, label_map.get(dk, dk))
+        cd = [[Paragraph(f'<b>{filenames}</b>', s['pair_h'])]]
+        cd.append([Paragraph(
+            f'<font color="{C_RISK_HIGH.hexval()}">●</font> 共同{actual_label}: <b>{_esc(g.shared_value)}</b>',
+            s['body'],
+        )])
+        card = Table(cd, colWidths=[PG_W], hAlign='CENTER')
+        card.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), C_BG),
+            ('TOPPADDING', (0, 0), (-1, 0), 3 * mm),
+            ('BOTTOMPADDING', (0, -1), (-1, -1), 3 * mm),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4 * mm),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4 * mm),
+            ('LINEBELOW', (0, 0), (-1, 0), 0.5, C_BORDER),
+        ]))
+        story.append(KeepTogether(card))
+        story.append(Spacer(1, 3 * mm))
 
 # ================================================================
 # 进度条
@@ -316,9 +373,29 @@ def _is(story,s,pairs,profiles):
 def generate_pdf(report:GlobalReport,output_path:str,enabled_dims:Optional[dict]=None)->str:
     _reg(); ss=_sty()
     if enabled_dims is None: enabled_dims={}
-    dp={}
-    for dk in ['file_id','author','editor','contact','company_name','credit_code']:
-        if enabled_dims.get(dk,True): dp[dk]=[p for p in report.pairwise_results if _has_dim(p,dk)]
+    dp={}; gp={}
+
+    # 元数据维度：按 group_type 过滤聚合组
+    # enabled_dims 的 key 是原始维度名，group_type 是细分类型
+    dim_to_group_types = {
+        'file_id': ['file_id'],
+        'author': ['author'],
+        'editor': ['editor'],
+        'contact': ['contact_mobile', 'contact_email', 'contact_name'],
+        'company_name': ['company_name'],
+        'credit_code': ['credit_code'],
+    }
+
+    for dk, gts in dim_to_group_types.items():
+        if not enabled_dims.get(dk, True):
+            continue
+        groups_for_dim = [g for g in report.metadata_groups if g.group_type in gts]
+        if groups_for_dim:
+            gp[dk] = groups_for_dim
+        else:
+            # fallback: pairwise
+            dp[dk] = [p for p in report.pairwise_results if _has_dim(p, dk)]
+
     if enabled_dims.get('content_similarity',True):
         dp['text_sim']=[p for p in report.pairwise_results if _has_dim(p,'text_sim')]
         dp['image_sim']=[p for p in report.pairwise_results if _has_dim(p,'image_sim')]
@@ -328,7 +405,10 @@ def generate_pdf(report:GlobalReport,output_path:str,enabled_dims:Optional[dict]
     _cover(story,ss,report)
     for dk,dt in [('file_id','文件码雷同'),('author','文档作者雷同'),('editor','编辑经办人雷同'),
                   ('contact','单位联系人雷同'),('company_name','公司名称雷同'),('credit_code','信用代码雷同')]:
-        if dp.get(dk): _sd(story,ss,dk,dt,dp[dk],report.file_profiles)
+        if gp.get(dk):
+            _sd(story, ss, dk, dt, [], report.file_profiles, groups=gp[dk])
+        elif dp.get(dk):
+            _sd(story, ss, dk, dt, dp[dk], report.file_profiles)
     if dp.get('text_sim'): _ts(story,ss,dp['text_sim'],report.file_profiles)
     if dp.get('image_sim'): _is(story,ss,dp['image_sim'],report.file_profiles)
 

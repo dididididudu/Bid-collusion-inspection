@@ -45,6 +45,7 @@ class DetectionConfig:
     RISK_LOW_THRESHOLD: int = 15
 
     # ── MinHash / LSH ──
+    MINHASH_LSH_THRESHOLD: float = 0.3          # datasketch MinHashLSH 阈值
     MINHASH_JACCARD_THRESHOLD: float = 0.3
     MINHASH_NUM_HASHES: int = 128
     MINHASH_NUM_HASHES_PARAGRAPH: int = 32
@@ -108,6 +109,10 @@ class DetectionConfig:
     IMAGE_BOILERPLATE_HASHES: list = field(default_factory=list)  # 已知模板哈希黑名单（方案6）
     BID_BOILERPLATE_FILTER: bool = True
     BID_BOILERPLATE_WEIGHT: float = 0.3
+
+    # ── 目录排除（方案六：目录结构雷同不参与查重）──
+    TOC_FILTER_ENABLED: bool = True      # 启用目录段落过滤
+    TOC_PAGE_RATIO: float = 0.2          # 目录检测页面范围（前 20% 页面）
 
     # ── 报告 ──
     REPORT_MAX_MATCHES_PER_PAIR: int = 10000

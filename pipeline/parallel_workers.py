@@ -10,10 +10,12 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resou
 warnings.filterwarnings('ignore', category=UserWarning, module='jieba')
 import os
 import logging
+import json
+import time
+import sqlite3
+import threading as _threading
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
-import json
-import threading as _threading
 
 from data_structures import (
     BidFeature, ChunkResult, PairwiseResult, EvidenceChain,
@@ -31,6 +33,25 @@ from image_analysis.image_matcher import ImageMatcher
 
 logger = logging.getLogger(__name__)
 _tls = _threading.local()
+
+
+def _begin_immediate_with_retry(conn, max_retries=10, base_delay=0.5):
+    """带重试的 BEGIN IMMEDIATE，缓解多进程写冲突
+
+    ProcessPoolExecutor 多 worker 同时写同一个 SQLite 时，
+    即使 busy_timeout 也可能竞争失败。重试 + 指数退避更可靠。
+    """
+    for attempt in range(max_retries):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as e:
+            if 'database is locked' in str(e) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.debug(f"BEGIN IMMEDIATE 冲突 (尝试 {attempt+1}/{max_retries})，等待 {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            raise
 
 
 def _get_thread_cache(db_dir, config):
@@ -148,7 +169,7 @@ def extract_single_worker(args: tuple) -> dict:
             return {"doc_id": doc_id, "filename": filename, "success": True}
 
         chunks = []
-        cache.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate_with_retry(cache.conn, max_retries=10)
         try:
             for chunk_result in extractor.extract_chunks(file_path, config.CHUNK_PAGE_SIZE, start_page):
                 cache.store_chunk(chunk_result, conn=cache.conn)
