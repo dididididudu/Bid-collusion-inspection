@@ -76,7 +76,7 @@ class DetectionConfig:
 
     # ── GPU / SBERT ──
     USE_GPU: bool = False
-    SBERT_DEVICE: str = "cpu"
+    SBERT_DEVICE: str = "auto"     # auto → 自动检测 CUDA / MPS / CPU
     SBERT_BATCH_SIZE: int = 64
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
