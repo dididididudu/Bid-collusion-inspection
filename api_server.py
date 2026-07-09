@@ -10,6 +10,20 @@ FastAPI 服务 — 投标文件串标围标检测
     GET  /api/detect/{task_id} 查询任务状态和结果
     GET  /api/dimensions      查询可用检测维度
 """
+
+# ── 一劳永逸解决 __pycache__ 陈旧问题 ──
+# ProcessPoolExecutor 子进程可能加载旧 .pyc 导致代码更新不生效。
+# 设置环境变量后子进程继承该设置，不会写入/读取 .pyc。
+import os as _os
+_os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+import sys as _sys
+_sys.dont_write_bytecode = True
+# 启动时清理一次项目目录下已有的 __pycache__
+for _root, _dirs, _files in _os.walk(_os.path.dirname(_os.path.abspath(__file__))):
+    if '__pycache__' in _dirs:
+        import shutil as _shutil
+        _shutil.rmtree(_os.path.join(_root, '__pycache__'), ignore_errors=True)
+
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
 warnings.filterwarnings('ignore', category=UserWarning, module='jieba')
@@ -56,11 +70,16 @@ _log_handler.setFormatter(logging.Formatter(
 ))
 logging.getLogger().addHandler(_log_handler)
 
-# 静默第三方库的 INFO 日志
+# 根日志器级别设为 INFO，让正常运行信息也能写入日志
+logging.getLogger().setLevel(logging.INFO)
+
+# 第三方库保持 WARNING，避免刷屏
 for _lib in ['jieba', 'paddleocr', 'paddle', 'paddlex', 'easyocr',
              'torch', 'cv2', 'matplotlib', 'urllib3',
              'transformers', 'sentence_transformers', 'sklearn', 'PIL']:
     logging.getLogger(_lib).setLevel(logging.WARNING)
+
+# 内部模块设为 INFO，让轨道、阶段、进度日志可见
 for _mod in ['pipeline.checkpoint', 'pipeline.streaming_context',
              'pipeline.parallel_workers', 'pipeline.ocr_helpers',
              'extraction.pdf_extractor', 'extraction.feature_cache',
@@ -69,7 +88,7 @@ for _mod in ['pipeline.checkpoint', 'pipeline.streaming_context',
              'matching.selector', 'embedding.embedding_engine',
              'image_analysis.image_hasher', 'image_analysis.image_matcher',
              'image_analysis.image_ocr']:
-    logging.getLogger(_mod).setLevel(logging.WARNING)
+    logging.getLogger(_mod).setLevel(logging.INFO)
 
 # ============================================================
 # FastAPI 应用
@@ -264,6 +283,18 @@ def _run_detection_impl(task_id: str):
         input_dir = os.path.join(record.work_dir, "input")
         output_dir = os.path.join(record.work_dir, "output")
 
+        # 打印任务配置摘要
+        file_list = os.listdir(input_dir) if os.path.isdir(input_dir) else []
+        file_sizes = {}
+        for fname in file_list:
+            fpath = os.path.join(input_dir, fname)
+            file_sizes[fname] = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
+        total_mb = sum(file_sizes.values()) / (1024 * 1024)
+        logger.info(f"任务 {task_id[:8]} 启动 — {len(file_list)} 个文件 ({total_mb:.1f} MB), "
+                    f"content_similarity={record.content_similarity}, "
+                    f"gpu={opts.get('use_gpu', False)}, ocr={opts.get('ocr_engine', 'easyocr')}")
+        logger.info(f"任务 {task_id[:8]} 文件列表: {', '.join(file_list)}")
+
         t0 = time.time()
 
         # 进度回调：Phase 3 每分析完一对就推送到 TaskRecord
@@ -318,6 +349,14 @@ def _run_detection_impl(task_id: str):
         record.completed_at = datetime.now().isoformat()
         record.output_dir = output_dir
 
+        # 任务完成摘要
+        dim_hits = [k for k, v in dims.items() if v.get("hit")]
+        logger.info(f"任务 {task_id[:8]} 完成 ─ "
+                    f"{report.total_files} 个文件, {report.total_pairs} 对, "
+                    f"{report.suspicious_pairs} 对可疑, "
+                    f"耗时 {record.elapsed_seconds:.1f}s, "
+                    f"命中维度: {dim_hits or '无'}")
+
         # 清理缓存和检查点目录（保留 output 目录供 PDF 下载）
         for subdir in ['cache', 'checkpoints', 'input']:
             path = os.path.join(record.work_dir, subdir)
@@ -326,7 +365,7 @@ def _run_detection_impl(task_id: str):
                 shutil.rmtree(path, ignore_errors=True)
 
     except Exception as e:
-        logger.exception(f"检测任务失败: {task_id}")
+        logger.exception(f"任务 {task_id[:8]} 失败: {e}")
         record.status = "failed"
         record.error = str(e)
         record.completed_at = datetime.now().isoformat()

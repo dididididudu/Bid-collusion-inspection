@@ -171,4 +171,4 @@ python api_server.py
 - Python 3.8+
 - 操作系统：Windows / Linux / macOS
 - 可选：NVIDIA GPU（CUDA 加速）
-- 磁盘空间：约 2GB（含模型缓存）
+- 磁盘空间：约 4GB（含模型缓存）

@@ -104,6 +104,9 @@ class ChunkedTextProcessor:
         # 总段落数
         total_paragraphs = sum(len(chunk.paragraphs) for chunk in chunks)
 
+        # 文档级 SimHash（合并所有块的 SimHash）
+        doc_simhash = self._aggregate_simhash(chunks)
+
         return BidFeature(
             doc_id=doc_id,
             filename=filename,

@@ -103,7 +103,7 @@ def _has_dim(pair, key):
     if key=='company_name': return bool(e.contact_evidence.common_companies)
     if key=='credit_code': return bool(e.contact_evidence.common_credit_codes)
     if key=='text_sim': return bool(e.text_evidence.paragraph_matches)
-    if key=='image_sim': return bool(e.image_evidence.common_image_hashes or e.image_evidence.text_identical_count>0)
+    if key=='image_sim': return bool(e.image_evidence.matched_image_pairs or e.image_evidence.common_image_hashes or e.image_evidence.text_identical_count>0)
     return False
 
 def _dim_detail(pair,key):

@@ -69,7 +69,7 @@ def _get_thread_doc(doc_id, cache):
     return _tls.doc_cache[doc_id]
 
 
-def _build_image_evidence(doc_a, doc_b, cache, config=None):
+def _build_image_evidence(doc_a, doc_b, cache, config=None, semantic_matcher=None):
     evidence = ImageEvidence()
     hashes_a = doc_a.image_hashes
     hashes_b = doc_b.image_hashes
@@ -100,7 +100,7 @@ def _build_image_evidence(doc_a, doc_b, cache, config=None):
     ]
 
     boilerplate_hashes = set(config.IMAGE_BOILERPLATE_HASHES) if config and config.IMAGE_BOILERPLATE_HASHES else None
-    matcher = ImageMatcher()
+    matcher = ImageMatcher(semantic_matcher=semantic_matcher)
     match_result = matcher.analyze(
         hashes_a=hashes_a, hashes_b=hashes_b,
         ocr_results_a=ocr_objects_a or None, ocr_results_b=ocr_objects_b or None,
@@ -118,7 +118,54 @@ def _build_image_evidence(doc_a, doc_b, cache, config=None):
     evidence.text_similar_count = match_result.text_similar_count
     evidence.image_risk_score = match_result.image_risk_score
     evidence.image_risk_factors = match_result.image_risk_factors
+
+    # 填充 matched_image_pairs（含缩略图 base64，供 PDF 报告 / API 展示）
+    for v in match_result.image_verdicts:
+        thumb_a_b64 = _thumbnail_to_base64(v.sig_a.thumbnail)
+        thumb_b_b64 = _thumbnail_to_base64(v.sig_b.thumbnail)
+        ocr_text_a = _find_ocr_text_by_hash(ocr_objects_a, v.sig_a.phash or v.sig_a.dhash)
+        ocr_text_b = _find_ocr_text_by_hash(ocr_objects_b, v.sig_b.phash or v.sig_b.dhash)
+        evidence.matched_image_pairs.append({
+            'source_a': v.sig_a.source_id,
+            'source_b': v.sig_b.source_id,
+            'phash_dist': v.phash_dist,
+            'dhash_dist': v.dhash_dist,
+            'orb_match_ratio': round(v.orb_match_ratio, 3),
+            'histogram_correlation': round(v.histogram_correlation, 3),
+            'confidence': round(v.confidence, 3),
+            'reasons': v.reasons,
+            'thumbnail_base64_a': thumb_a_b64,
+            'thumbnail_base64_b': thumb_b_b64,
+            'ocr_text_a': ocr_text_a,
+            'ocr_text_b': ocr_text_b,
+            'l1_pass': v.l1_pass,
+            'l2_pass': v.l2_pass,
+            'l3_pass': v.l3_pass,
+        })
+    evidence.matched_text_pairs = match_result.text_matches
+    evidence.ps_detail_list = match_result.ps_details
     return evidence
+
+
+def _thumbnail_to_base64(thumb_bytes: bytes) -> str:
+    """将缩略图字节转为 base64 data URI"""
+    if not thumb_bytes:
+        return ''
+    import base64
+    encoded = base64.b64encode(thumb_bytes).decode('utf-8')
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _find_ocr_text_by_hash(ocr_objects: list, hash_val: str) -> str:
+    """根据哈希值在 OCR 结果列表中找对应文本"""
+    if not hash_val:
+        return ''
+    for obj in ocr_objects:
+        img_hash = obj.image_hash if hasattr(obj, 'image_hash') else ''
+        text = obj.text if hasattr(obj, 'text') else ''
+        if img_hash and (hash_val in img_hash or img_hash in hash_val):
+            return text[:200]
+    return ''
 
 
 def extract_single_worker(args: tuple) -> dict:
@@ -127,7 +174,8 @@ def extract_single_worker(args: tuple) -> dict:
     from config import DetectionConfig
     config = DetectionConfig(**config_dict)
     ocr_engine = None
-    use_gpu_mgr = gpu_manager_client is not None
+    use_gpu_mgr = gpu_manager_client is not None and gpu_manager_client.enabled
+    t_worker = time.time()
 
     try:
         from extraction.contact_extractor import extract_contacts_from_sqlite
@@ -135,18 +183,13 @@ def extract_single_worker(args: tuple) -> dict:
         extractor = PyMuPDFExtractor(config)
         text_processor = ChunkedTextProcessor(config)
 
-        if config.ENABLE_OCR and not use_gpu_mgr:
-            from image_analysis.image_ocr import ImageOCREngine
-            ocr_engine = ImageOCREngine(
-                use_gpu=config.USE_GPU, engine=config.OCR_ENGINE,
-                model_dir=config.OCR_MODEL_DIR, offline=config.OCR_OFFLINE_MODE,
-                retry_count=config.OCR_RETRY_COUNT,
-            )
-
         metadata, page_count, is_scanned = extractor.extract_metadata(file_path)
         doc_id = extractor._generate_doc_id(file_path)
         filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
+
+        logger.info(f"[Worker] 开始: {filename} ({page_count} 页, "
+                    f"{file_size / 1024:.0f} KB)")
 
         existing_chunks = cache.load_document_chunks(doc_id)
         processed_chunks = {c.chunk_index for c in existing_chunks}
@@ -191,6 +234,14 @@ def extract_single_worker(args: tuple) -> dict:
             feature.image_hashes = list(all_img_hashes)
             cache.store_document(feature)
 
+            if config.ENABLE_OCR and not use_gpu_mgr:
+                from image_analysis.image_ocr import ImageOCREngine
+                ocr_engine = ImageOCREngine(
+                    use_gpu=config.USE_GPU, engine=config.OCR_ENGINE,
+                    model_dir=config.OCR_MODEL_DIR, offline=config.OCR_OFFLINE_MODE,
+                    retry_count=config.OCR_RETRY_COUNT,
+                )
+
             if ocr_engine is not None:
                 from pipeline.ocr_helpers import ocr_pages as _ocr_pages
                 _ocr_pages(
@@ -214,7 +265,12 @@ def extract_single_worker(args: tuple) -> dict:
             pass
 
         cache.conn.commit()
-        logger.info(f"[Worker] 完成: {filename}")
+        elapsed = time.time() - t_worker
+        total_paras = sum(len(c.paragraphs) for c in chunks) if chunks else 0
+        total_imgs = sum(len(c.image_hashes) for c in chunks) if chunks else 0
+        logger.info(f"[Worker] 完成: {filename} "
+                    f"({page_count} 页, {len(chunks)} 块, {total_paras} 段, "
+                    f"{total_imgs} 图片哈希, {elapsed:.1f}s)")
         return {"doc_id": doc_id, "filename": filename, "success": True}
 
     except Exception as e:
@@ -238,6 +294,7 @@ def analyze_pair_worker(args: tuple) -> dict:
     from config import DetectionConfig
     config = DetectionConfig(**config_dict)
     cache = None
+    t_start = time.time()
     try:
         from matching.paragraph_matcher import ParagraphMatcher
 
@@ -250,6 +307,8 @@ def analyze_pair_worker(args: tuple) -> dict:
             cache.conn.commit()
             return {"pair_id": pair_id, "success": False, "match_count": 0, "error": "Doc not found"}
 
+        fname_a, fname_b = doc_a.filename, doc_b.filename
+
         if _tls.matcher is None:
             _tls.matcher = ParagraphMatcher(config)
         matcher = _tls.matcher
@@ -258,7 +317,9 @@ def analyze_pair_worker(args: tuple) -> dict:
 
         if not doc_a.doc_minhash or not doc_b.doc_minhash:
             if doc_a.image_hashes or doc_b.image_hashes:
-                image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
+                logger.info(f"[Analyze] 无文本-仅图片: {fname_a} vs {fname_b}")
+                image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
+                                                        semantic_matcher=getattr(matcher, 'semantic_matcher', None))
                 metadata_evidence = build_metadata_evidence(doc_a, doc_b)
                 evidence = EvidenceChain(
                     text_evidence=TextEvidence(),
@@ -279,20 +340,24 @@ def analyze_pair_worker(args: tuple) -> dict:
                 cache.conn.commit()
                 return {"pair_id": pair_id, "success": True, "match_count": 0,
                         "clone_block_count": 0, "text_similarity": 0.0,
-                        "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                        "filename_a": fname_a, "filename_b": fname_b,
                         "error": ""}
             else:
                 cache.mark_pair_processed(doc_a_id, doc_b_id)
                 cache.conn.commit()
                 return {"pair_id": pair_id, "success": True, "match_count": 0,
                         "clone_block_count": 0, "text_similarity": 0.0,
-                        "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                        "filename_a": fname_a, "filename_b": fname_b,
                         "error": ""}
 
+        t_match = time.time()
         paragraph_matches = matcher.match(doc_a, doc_b, cache)
+        match_time = time.time() - t_match
+
         text_evidence = _build_text_evidence_basic(doc_a, doc_b, paragraph_matches, config)
         metadata_evidence = build_metadata_evidence(doc_a, doc_b)
-        image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config)
+        image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
+                                                semantic_matcher=getattr(matcher, 'semantic_matcher', None))
 
         evidence = EvidenceChain(
             text_evidence=text_evidence,
@@ -314,11 +379,18 @@ def analyze_pair_worker(args: tuple) -> dict:
         cache.conn.commit()
 
         clone_block_count = len(text_evidence.continuous_clone_blocks) if hasattr(text_evidence, 'continuous_clone_blocks') else 0
+
+        total_time = time.time() - t_start
+        logger.info(f"[Analyze] {fname_a} vs {fname_b} — "
+                    f"匹配 {len(paragraph_matches)} 段, "
+                    f"相似度 {text_evidence.local_similarity:.3f}, "
+                    f"克隆块 {clone_block_count}, "
+                    f"匹配耗时 {match_time:.2f}s, 总计 {total_time:.2f}s")
         return {"pair_id": pair_id, "success": True,
                 "match_count": len(paragraph_matches),
                 "clone_block_count": clone_block_count,
                 "text_similarity": text_evidence.local_similarity,
-                "filename_a": doc_a.filename, "filename_b": doc_b.filename,
+                "filename_a": fname_a, "filename_b": fname_b,
                 "error": ""}
 
     except Exception as e:
