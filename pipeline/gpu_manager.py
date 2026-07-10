@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # 哨兵值 — 通知 GPU Manager 进程优雅退出
 _SENTINEL = '__GPU_MANAGER_SHUTDOWN__'
-_QUEUE_TIMEOUT = 600  # 10 分钟
+_QUEUE_TIMEOUT = 60  # 1 分钟（单批次 OCR 推理不应超过此时间）
 
 
 # ────────────────────────────────────────────────────────────

@@ -43,6 +43,13 @@ class EmbeddingEngine:
         self._model = None
         self._device = None
 
+    def set_model(self, model):
+        """注入外部已加载的 SBERT 模型，避免重复加载"""
+        self._model = model
+        if model is not None and hasattr(model, 'device'):
+            self._device = str(model.device).lower()
+            logger.info(f"EmbeddingEngine: 复用外部模型实例 (设备: {self._device})")
+
     @property
     def is_available(self) -> bool:
         return SBERT_AVAILABLE

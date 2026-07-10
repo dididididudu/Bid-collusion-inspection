@@ -163,8 +163,36 @@ class ImageMatcher:
             result.image_risk_score = 0
             return result
 
+        matched_hashes_a = set()
+        matched_hashes_b = set()
+        for v in result.image_verdicts:
+            if v.is_match:
+                if v.sig_a.phash:
+                    matched_hashes_a.add(v.sig_a.phash)
+                if v.sig_b.phash:
+                    matched_hashes_b.add(v.sig_b.phash)
+
+        ocr_a_filtered = []
+        ocr_b_filtered = []
+        for r in ocr_results_a:
+            img_hash = getattr(r, 'image_hash', '') or r.get('image_hash', '')
+            if img_hash:
+                _, _, hval = ImageHasher.parse_hash_string(img_hash)
+                if hval not in matched_hashes_a:
+                    ocr_a_filtered.append(r)
+            else:
+                ocr_a_filtered.append(r)
+        for r in ocr_results_b:
+            img_hash = getattr(r, 'image_hash', '') or r.get('image_hash', '')
+            if img_hash:
+                _, _, hval = ImageHasher.parse_hash_string(img_hash)
+                if hval not in matched_hashes_b:
+                    ocr_b_filtered.append(r)
+            else:
+                ocr_b_filtered.append(r)
+
         # === L2: 图片文字比对（SBERT 优先） ===
-        self._detect_text_similarity(ocr_results_a, ocr_results_b, result)
+        self._detect_text_similarity(ocr_a_filtered, ocr_b_filtered, result)
 
         # === L3: 相同错别字 + 相同稀有词 ===
         all_words_a = []
@@ -173,12 +201,16 @@ class ImageMatcher:
             all_words_a.extend(r.words)
         for r in ocr_results_b:
             all_words_b.extend(r.words)
-        self._detect_shared_typos(all_words_a, all_words_b, result)
-        self._detect_shared_rare_words(all_words_a, all_words_b, result)
+
+        if len(ocr_results_a) >= self.TYPO_MIN_COUNT and len(ocr_results_b) >= self.TYPO_MIN_COUNT:
+            self._detect_shared_typos(all_words_a, all_words_b, result)
+            self._detect_shared_rare_words(all_words_a, all_words_b, result)
+        else:
+            logger.debug(f"L3: OCR图片数量不足 ({len(ocr_results_a)}/{len(ocr_results_b)} < {self.TYPO_MIN_COUNT})，跳过错别字检测")
 
         # === L4: PS 嫌疑层（多证据联合） ===
         self._detect_ps_suspicious_enhanced(
-            ocr_results_a, ocr_results_b, result
+            ocr_a_filtered, ocr_b_filtered, result
         )
 
         return result
@@ -210,16 +242,6 @@ class ImageMatcher:
                 result.near_identical_count += 1
             else:
                 result.similar_image_count += 1
-
-        # 也运行旧版匹配保留向后兼容
-        raw_hashes_a = []
-        for sig in sigs_a:
-            raw_hashes_a.extend(sig.raw_hashes)
-        raw_hashes_b = []
-        for sig in sigs_b:
-            raw_hashes_b.extend(sig.raw_hashes)
-        if raw_hashes_a and raw_hashes_b:
-            result.hash_matches = self.hasher.match_hashes(raw_hashes_a, raw_hashes_b)
 
         if result.exact_image_count > 0:
             result.image_risk_factors.append(
@@ -502,14 +524,34 @@ class ImageMatcher:
         """
         ps_pairs = []
 
+        import jieba
+        text_to_words_a = {}
+        text_to_words_b = {}
+
+        for ra in ocr_a:
+            if len(ra.text) >= self.TEXT_MIN_LENGTH:
+                text_to_words_a[id(ra)] = {w for w in jieba.cut(ra.text) if len(w) > 1}
+        for rb in ocr_b:
+            if len(rb.text) >= self.TEXT_MIN_LENGTH:
+                text_to_words_b[id(rb)] = {w for w in jieba.cut(rb.text) if len(w) > 1}
+
         for ra in ocr_a:
             if len(ra.text) < self.TEXT_MIN_LENGTH:
                 continue
+            words_a = text_to_words_a.get(id(ra), set())
+            if not words_a:
+                continue
+
             for rb in ocr_b:
                 if len(rb.text) < self.TEXT_MIN_LENGTH:
                     continue
+                words_b = text_to_words_b.get(id(rb), set())
+                if not words_b:
+                    continue
 
-                text_sim = self._text_similarity(ra.text, rb.text)
+                intersection = words_a & words_b
+                union = words_a | words_b
+                text_sim = len(intersection) / len(union) if union else 0.0
 
                 # === 场景B: 文字不同 + non_text_hash 接近 ===
                 # PS 嫌疑定义：图片（背景）相同但文字被修改过

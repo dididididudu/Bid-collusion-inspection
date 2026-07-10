@@ -83,6 +83,9 @@ class DetectionConfig:
     ENABLE_EMBEDDING_CACHE: bool = True
     EMBEDDING_DIM: int = 384
     EMBED_WORKERS: int = 1           # CPU 上单进程即可
+    GPU_MANAGER_ENABLED: bool = False  # GPU Manager 开关（CPU服务器禁用）
+    OCR_BATCH_SIZE: int = 4            # OCR 批处理大小（CPU场景减小）
+    OCR_BATCH_TIMEOUT: float = 1.0     # 批处理聚合超时（CPU场景缩短）
 
     # ── 文档预筛 ──
     DOC_VECTOR_FILTER_ENABLED: bool = True

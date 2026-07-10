@@ -7,6 +7,7 @@ OCR 辅助函数 — 供 orchestrator 和 parallel_workers 共用
 import os
 import io
 import logging
+import threading
 from typing import List, Dict, Optional
 
 import numpy as np
@@ -20,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 # OCR 聚合段落的虚拟块索引
 OCR_CHUNK_INDEX: int = 1000000
+
+# 线程局部存储 — 每个线程独立的 OCR 引擎
+_ocr_tls = threading.local()
 
 
 def _compute_non_text_hash(img_array: np.ndarray, bboxes: List[Dict]) -> str:
@@ -102,14 +106,14 @@ def _ocr_crop_worker(args: tuple) -> Optional[tuple]:
     if img_array.size == 0:
         return None
 
-    # 使用线程局部的 OCR 引擎（避免多线程共享同一引擎实例的潜在问题）
+    # 使用线程局部的 OCR 引擎（每个线程独立实例，避免多线程共享同一引擎的线程安全问题）
     # 首次调用时会初始化，后续复用
-    if not hasattr(_ocr_crop_worker, '_engine'):
+    if not hasattr(_ocr_tls, '_engine'):
         from image_analysis.image_ocr import ImageOCREngine
-        _ocr_crop_worker._engine = ImageOCREngine(
+        _ocr_tls._engine = ImageOCREngine(
             use_gpu=use_gpu, engine=ocr_engine_type,
         )
-    ocr = _ocr_crop_worker._engine
+    ocr = _ocr_tls._engine
 
     ocr_result = ocr.extract(img_array)
     ocr_result.image_hash = phash
@@ -284,10 +288,8 @@ def ocr_pages(
         logger.debug("OCR: 提交 %d 张图片到 GPU Manager", len(images))
 
         batch_results, meta_list = gpu_manager.batch_ocr(images, metadata)
-        for result, meta in zip(batch_results, meta_list):
+        for idx, (result, meta) in enumerate(zip(batch_results, meta_list)):
             if result.confidence >= meta['min_conf'] and result.text.strip():
-                # 补充缩略图和非文字哈希（GPU Manager 不做这些 CPU 操作）
-                idx = metadata.index(meta) if meta in metadata else -1
                 img_array = images[idx] if 0 <= idx < len(images) else None
                 if img_array is not None:
                     result.thumbnail = _make_thumbnail(img_array)
@@ -315,13 +317,14 @@ def ocr_pages(
                     ocr_results.append((result, phash, img_w, img_h, page_n))
         else:
             logger.debug(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 future_map = {executor.submit(_ocr_crop_worker, task): task
                               for task in crop_tasks}
                 for future in as_completed(future_map):
                     try:
-                        ret = future.result()
+                        # 单张图最多 30 秒，超时则跳过
+                        ret = future.result(timeout=30)
                         if ret is not None:
                             page_n, result = ret
                             ocr_results.append((
@@ -329,6 +332,8 @@ def ocr_pages(
                                 result.image_width, result.image_height,
                                 page_n,
                             ))
+                    except TimeoutError:
+                        logger.error(f"OCR 线程超时（单张图超过 30 秒）")
                     except Exception as e:
                         logger.debug(f"OCR 线程异常: {e}")
 

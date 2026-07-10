@@ -798,6 +798,23 @@ class DocumentCache:
                 data
             )
 
+    def store_paragraph_embeddings_batch(self, batch_data: List[tuple]) -> None:
+        """跨文档批量存储段落嵌入向量
+
+        Args:
+            batch_data: [(doc_id, para_index, embedding_array), ...]
+        """
+        data = []
+        for doc_id, para_idx, embedding in batch_data:
+            blob = embedding.astype(np.float32).tobytes()
+            data.append((blob, doc_id, para_idx))
+        with self.transaction() as conn:
+            conn.executemany(
+                "UPDATE paragraphs SET embedding = ? "
+                "WHERE doc_id = ? AND para_index = ?",
+                data
+            )
+
     def load_paragraph_embeddings(
         self, doc_id: str, para_indices: List[int]
     ) -> Dict[int, 'np.ndarray']:

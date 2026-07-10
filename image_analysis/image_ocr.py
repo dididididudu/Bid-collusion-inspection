@@ -375,15 +375,15 @@ class ImageOCREngine:
                     use_angle_cls=False,
                     show_log=False,
                     use_gpu=self.use_gpu,
-                    det=False,       # 禁用目标检测，仅文字识别
-                    rec=True,        # 启用文字识别
+                    det=True,
+                    rec=True,
                     **common_kwargs,
                 )
                 self._paddle_version = 2
             else:
                 # === PaddleOCR 3.x (PP-OCRv6) ===
-                # 3.x 使用 paddlex pipelines，支持 PP-OCRv5/v6 等新版模型
-                # GPU 环境下检测速度很快，使用完整的检测+识别 pipeline
+                # 3.x 使用 paddlex pipelines，必须显式传入 device 参数
+                common_kwargs['device'] = 'gpu' if self.use_gpu else 'cpu'
                 self._reader = PaddleOCR(
                     lang='ch',
                     ocr_version='PP-OCRv6',
@@ -443,6 +443,32 @@ class ImageOCREngine:
     # OCR 提取（带重试）
     # ================================================================
 
+    def _preprocess_image(self, image: 'np.ndarray') -> 'np.ndarray':
+        """OCR 前图像预处理 — 加速 CPU 推理
+
+        - resize: 长边最大 1280px，保持比例
+        - grayscale: 转灰度图（PaddleOCR 支持灰度输入）
+        """
+        if image is None or image.size == 0:
+            return image
+
+        max_dim = 1280
+        h, w = image.shape[:2]
+
+        if max(h, w) > max_dim:
+            ratio = max_dim / max(h, w)
+            new_w = int(w * ratio)
+            new_h = int(h * ratio)
+            from PIL import Image as PILImage
+            pil_img = PILImage.fromarray(image)
+            pil_img = pil_img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+            image = np.array(pil_img)
+
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image = np.mean(image, axis=2).astype(np.uint8)
+
+        return image
+
     def extract(self, image: 'np.ndarray') -> OCRResult:
         """从图片中提取文字（带重试机制）
 
@@ -454,6 +480,8 @@ class ImageOCREngine:
         """
         if not self.is_available:
             return OCRResult()
+
+        image = self._preprocess_image(image)
 
         last_error = None
         for attempt in range(self._retry_count + 1):
@@ -514,6 +542,7 @@ class ImageOCREngine:
         """EasyOCR 批量 — 逐张调用（EasyOCR 无原生 batch）"""
         results = []
         for img in images:
+            img = self._preprocess_image(img)
             result = self._extract_easyocr(img)
             if result.confidence < min_confidence:
                 result = OCRResult()
@@ -523,19 +552,26 @@ class ImageOCREngine:
     def _extract_paddleocr_batch(
         self, images: List['np.ndarray'], min_confidence: float
     ) -> List['OCRResult']:
-        """PaddleOCR 批量 — 利用原生 batch 推理
+        """PaddleOCR 批量 — 逐张调用确保独立结果
 
-        PaddleOCR 3.x: predict(list_of_images) 一次性推理
+        PaddleOCR 3.x: predict(img) 逐张推理（避免批量返回结构不确定导致的引用共享问题）
         PaddleOCR 2.x: ocr(list_of_images) 一次性推理
         """
         paddle_version = getattr(self, '_paddle_version', 2)
 
         if paddle_version >= 3:
-            raw_list = self._reader.predict(images)
-            if not isinstance(raw_list, list):
-                raw_list = [raw_list] * len(images)  # 单张结果包裹
+            raw_list = []
+            for img in images:
+                img = self._preprocess_image(img)
+                try:
+                    raw = self._reader.predict(img)
+                    raw_list.append(raw)
+                except Exception as e:
+                    logger.debug(f"PaddleOCR 3.x 单张预测失败: {e}")
+                    raw_list.append(None)
         else:
-            raw_list = self._reader.ocr(images, cls=False)
+            processed_images = [self._preprocess_image(img) for img in images]
+            raw_list = self._reader.ocr(processed_images, cls=False)
             if raw_list is None:
                 raw_list = [None] * len(images)
 

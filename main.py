@@ -148,16 +148,17 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
 
         # 预加载 SBERT 模型（避免 Phase 1.5/3 中重复加载）
         logger.info("预加载 SBERT 模型...")
+        sbert_model = None
         try:
             from sentence_transformers import SentenceTransformer
-            _sbert_model = SentenceTransformer(
+            sbert_model = SentenceTransformer(
                 'paraphrase-multilingual-MiniLM-L12-v2',
                 device=config.SBERT_DEVICE if config.SBERT_DEVICE != "auto" else "cpu",
                 cache_folder='./models',
                 trust_remote_code=True,
                 local_files_only=False,
             )
-            logger.info(f"SBERT 模型预加载完成 (设备: {_sbert_model.device})")
+            logger.info(f"SBERT 模型预加载完成 (设备: {sbert_model.device})")
         except Exception as e:
             logger.warning(f"SBERT 模型预加载失败（后续将按需加载）: {e}")
 
@@ -177,6 +178,10 @@ def main(input_dir: str, output_dir: str, config_path: str = None,
             logger.info("旧缓存文件已清除")
 
         service = BidDetectionOrchestrator(config)
+
+        if sbert_model is not None:
+            service.embedding_engine.set_model(sbert_model)
+            logger.info("预加载 SBERT 模型已注入 EmbeddingEngine")
 
         process_start = datetime.now()
         service.detect(input_dir, output_dir)

@@ -534,111 +534,20 @@ class BidDetectionOrchestrator:
         self, file_path: str, doc_id: str, page_count: int,
         force: bool = False,
     ) -> int:
+        """OCR 提取嵌入图片文字 — 统一委托给 ocr_helpers.ocr_pages
+
+        始终使用 ocr_pages()（含去重、并行、批量入库），
+        不再区分 GPU Manager 启用与否走不同代码路径。
+        """
         if not self.config.ENABLE_OCR:
             return 0
 
-        if self.gpu_manager.enabled:
-            return ocr_pages(
-                file_path, doc_id, page_count,
-                self.cache, self.config, self.ocr_engine,
-                force=force, ocr_workers=self.config.OCR_WORKERS,
-                gpu_manager=self.gpu_manager.client,
-            )
-
-        if not self.ocr_engine.is_available:
-            logger.debug("OCR 引擎不可用，跳过图片文字提取")
-            return 0
-
-        if not force:
-            existing_ocr = self.cache.load_image_ocr_results(doc_id)
-            if existing_ocr:
-                logger.debug(f"OCR: {os.path.basename(file_path)} 已有 {len(existing_ocr)} 条结果，跳过")
-                return len(existing_ocr)
-
-        import fitz
-        from PIL import Image
-        import io
-        import imagehash
-        import numpy as np
-
-        logger.info(f"OCR: {os.path.basename(file_path)} ({page_count} 页)...")
-        ocr_count = 0
-        sample_step = self.config.OCR_SAMPLE_STEP
-        min_conf = self.config.OCR_MIN_CONFIDENCE
-
-        try:
-            doc = fitz.open(file_path)
-        except Exception as e:
-            logger.error(f"OCR: 无法打开 PDF ({file_path}): {e}")
-            return 0
-
-        try:
-            for page_num in range(0, page_count, sample_step):
-                try:
-                    page = doc[page_num]
-                    image_info_list = page.get_image_info()
-                    if not image_info_list:
-                        continue
-
-                    valid_images = []
-                    min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
-                    for info in image_info_list:
-                        w = info.get('width', 0)
-                        h = info.get('height', 0)
-                        if w >= min_size and h >= min_size:
-                            valid_images.append(info)
-
-                    if not valid_images:
-                        continue
-
-                    OCR_DPI = 200
-                    scale = OCR_DPI / 72.0
-                    pix = page.get_pixmap(dpi=OCR_DPI)
-                    full_img = Image.open(io.BytesIO(pix.tobytes("png")))
-
-                    for info in valid_images:
-                        try:
-                            bbox = info.get('bbox', (0, 0, 0, 0))
-                            x0, y0, x1, y1 = bbox
-                            px0 = int(x0 * scale)
-                            py0 = int(y0 * scale)
-                            px1 = int(x1 * scale)
-                            py1 = int(y1 * scale)
-                            crop = full_img.crop((px0, py0, px1, py1))
-                            if crop.size[0] < 10 or crop.size[1] < 10:
-                                continue
-
-                            phash = str(imagehash.phash(crop))
-                            img_array = np.array(crop)
-                            ocr_result = self.ocr_engine.extract(img_array)
-                            ocr_result.image_hash = phash
-
-                            if ocr_result.confidence < min_conf:
-                                continue
-                            if not ocr_result.text.strip():
-                                continue
-
-                            self.cache.store_image_ocr_result(
-                                doc_id=doc_id, page_num=page_num,
-                                image_hash=phash,
-                                ocr_text=ocr_result.text,
-                                ocr_words=ocr_result.words,
-                                bboxes=ocr_result.bboxes,
-                                confidence=ocr_result.confidence,
-                            )
-                            ocr_count += 1
-                        except Exception as e:
-                            logger.debug(f"OCR: 第 {page_num} 页裁剪区失败: {e}")
-                            continue
-                except Exception as e:
-                    logger.debug(f"OCR: 第 {page_num} 页失败 ({os.path.basename(file_path)}): {e}")
-                    continue
-        finally:
-            doc.close()
-
-        if ocr_count > 0:
-            logger.info(f"OCR: {os.path.basename(file_path)} — {ocr_count} 张图片成功提取文字")
-        return ocr_count
+        return ocr_pages(
+            file_path, doc_id, page_count,
+            self.cache, self.config, self.ocr_engine,
+            force=force, ocr_workers=self.config.OCR_WORKERS,
+            gpu_manager=self.gpu_manager.client,
+        )
 
     def _aggregate_ocr_to_paragraphs(self, doc_id: str, page_count: int) -> int:
         import jieba
@@ -780,37 +689,85 @@ class BidDetectionOrchestrator:
             return
 
         logger.info(f"Phase 1.5: 准备编码 {len(features)} 个文档的段落嵌入")
+
+        dimension = self.config.ANALYSIS_DIMENSION
+        if dimension in ("technical", "commercial"):
+            logger.info(f"Phase 1.5: 仅编码 {dimension} 页面段落")
+
+        import numpy as np
+
+        batch_size = max(32, self.config.SBERT_BATCH_SIZE)
+        accumulate_size = 512
+
+        all_paragraphs = []
+        all_doc_ids = []
+        all_para_indices = []
         total_paragraphs = 0
 
-        embed_doc_ids = [f.doc_id for f in features if f.doc_minhash]
-        if not embed_doc_ids:
-            logger.info("Phase 1.5: 没有需要编码的文档")
-        else:
-            dimension = self.config.ANALYSIS_DIMENSION
-            if dimension in ("technical", "commercial"):
-                logger.info(f"Phase 1.5: 仅编码 {dimension} 页面段落")
-            logger.info(f"Phase 1.5 单进程模式: 编码 {len(embed_doc_ids)} 个文档")
-            for doc_feat in features:
-                if not doc_feat.doc_minhash:
-                    continue
-                try:
-                    if dimension in ("technical", "commercial"):
-                        # 按维度过滤段落：只保留指定维度的页面
-                        para_full = self.cache.load_all_paragraphs_full(doc_feat.doc_id)
-                        pages = getattr(doc_feat, 'page_classifications', {}) or {}
-                        paragraphs = []
-                        for idx, info in sorted(para_full.items()):
-                            page_num = info.get('page_num', -1)
-                            if pages.get(page_num, 'unknown') == dimension:
-                                paragraphs.append(info.get('text', ''))
-                    else:
-                        paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
-                    if paragraphs:
-                        count = engine.encode_document(doc_feat.doc_id, paragraphs, self.cache)
-                        total_paragraphs += count
-                except Exception as e:
-                    logger.error(f"嵌入编码失败 ({doc_feat.filename}): {e}", exc_info=True)
-                    continue
+        def flush_batch():
+            nonlocal total_paragraphs
+            if not all_paragraphs:
+                return
+            try:
+                logger.debug(f"Phase 1.5: 批量编码 {len(all_paragraphs)} 个段落...")
+                embeddings = engine.model.encode(
+                    all_paragraphs,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )
+
+                doc_embeddings = {}
+                for idx, (doc_id, para_idx) in enumerate(zip(all_doc_ids, all_para_indices)):
+                    if doc_id not in doc_embeddings:
+                        doc_embeddings[doc_id] = []
+                    doc_embeddings[doc_id].append(embeddings[idx])
+
+                for doc_id, doc_embs in doc_embeddings.items():
+                    doc_embedding = np.mean(doc_embs, axis=0).astype(np.float32)
+                    self.cache.store_document_embedding(doc_id, doc_embedding)
+
+                self.cache.store_paragraph_embeddings_batch(
+                    list(zip(all_doc_ids, all_para_indices, embeddings))
+                )
+                total_paragraphs += len(all_paragraphs)
+                logger.debug(f"Phase 1.5: 批量完成，累计 {total_paragraphs} 个段落")
+            except Exception as e:
+                logger.error(f"Phase 1.5: 批量编码失败: {e}", exc_info=True)
+            finally:
+                all_paragraphs.clear()
+                all_doc_ids.clear()
+                all_para_indices.clear()
+
+        for doc_feat in features:
+            if not doc_feat.doc_minhash:
+                continue
+            try:
+                if dimension in ("technical", "commercial"):
+                    para_full = self.cache.load_all_paragraphs_full(doc_feat.doc_id)
+                    pages = getattr(doc_feat, 'page_classifications', {}) or {}
+                    paragraphs = []
+                    for idx, info in sorted(para_full.items()):
+                        page_num = info.get('page_num', -1)
+                        if pages.get(page_num, 'unknown') == dimension:
+                            paragraphs.append(info.get('text', ''))
+                else:
+                    paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
+
+                if paragraphs:
+                    for para_idx, text in enumerate(paragraphs):
+                        all_paragraphs.append(text)
+                        all_doc_ids.append(doc_feat.doc_id)
+                        all_para_indices.append(para_idx)
+
+                        if len(all_paragraphs) >= accumulate_size:
+                            flush_batch()
+
+            except Exception as e:
+                logger.error(f"段落加载失败 ({doc_feat.filename}): {e}", exc_info=True)
+                continue
+
+        flush_batch()
 
         state.phase = 3
         self.checkpoint.save(state)
