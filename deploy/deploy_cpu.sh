@@ -43,24 +43,34 @@ pip install fastapi uvicorn requests pydantic -q
 pip install sentence-transformers==3.0.1 -q
 echo "  ✅ 依赖安装完成"
 
-# ── 4. 模型下载 ──
+# ── 4. 模型验证 ──
 echo ""
-echo "[4/6] 下载模型..."
-echo "  ⏳ PaddleOCR (~5MB)..."
+echo "[4/6] 验证模型..."
+echo "  ⏳ 检查 SBERT 模型..."
+python -c "
+import os
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer(
+    'paraphrase-multilingual-MiniLM-L12-v2',
+    device='cpu',
+    cache_folder='./models',
+    trust_remote_code=True,
+    local_files_only=True,
+)
+print(f'  ✅ SBERT 就绪 (维度: {model.get_sentence_embedding_dimension()})')
+" 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "  ⚠️  本地 SBERT 模型不可用，首次运行将自动下载"
+fi
+
+echo "  ⏳ 检查 PaddleOCR 模型..."
 python -c "
 import os
 os.environ['PADDLEOCR_HOME'] = os.path.expanduser('~/.paddleocr')
 from paddleocr import PaddleOCR
 PaddleOCR(lang='ch', use_angle_cls=False, show_log=False, use_gpu=False, det=False, rec=True)
 print('  ✅ PaddleOCR 就绪')
-" 2>/dev/null || echo "  ⚠️  首次运行会自动下载"
-
-echo "  ⏳ SBERT (~470MB，需数分钟)..."
-python -c "
-from sentence_transformers import SentenceTransformer
-SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2', device='cpu')
-print('  ✅ SBERT 就绪')
-" 2>/dev/null || echo "  ⚠️  首次运行会自动下载"
+" 2>/dev/null || echo "  ⚠️  PaddleOCR 首次运行会自动下载"
 
 # ── 5. 健康检查 ──
 echo ""
