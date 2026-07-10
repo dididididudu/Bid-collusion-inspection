@@ -223,6 +223,31 @@ def _thumbnail_to_base64(thumb_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
+# ================================================================
+# 维度标签辅助函数（技术标/商务标）
+# ================================================================
+
+def _get_image_dimension_tag(page_a: int, page_b: int, doc_a, doc_b) -> str:
+    """判断图片匹配对属于技术标、商务标还是混合
+
+    依据 doc.page_classifications 中每页的标签。
+    Returns: "tech_image" | "com_image" | "tech_image+com_image" | "unknown"
+    """
+    pages_a = getattr(doc_a, 'page_classifications', {}) or {}
+    pages_b = getattr(doc_b, 'page_classifications', {}) or {}
+    tag_a = pages_a.get(page_a, 'unknown')
+    tag_b = pages_b.get(page_b, 'unknown')
+
+    if tag_a == 'technical' and tag_b == 'technical':
+        return 'tech_image'
+    elif tag_a == 'commercial' and tag_b == 'commercial':
+        return 'com_image'
+    elif (tag_a == 'technical' or tag_b == 'technical') and \
+         (tag_a == 'commercial' or tag_b == 'commercial'):
+        return 'tech_image+com_image'
+    return 'unknown'
+
+
 def _find_ocr_text_by_hash(ocr_objects: list, hash_val: str) -> str:
     """根据哈希值在 OCR 结果列表中找对应文本
 

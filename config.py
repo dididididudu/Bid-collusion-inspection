@@ -70,19 +70,19 @@ class DetectionConfig:
     DISABLE_CACHE: bool = False
 
     # ── 并行 ──
-    PHASE1_WORKERS: int = 4
-    PHASE3_WORKERS: int = 4
+    PHASE1_WORKERS: int = 2         # CPU 场景不宜过高，文本提取 IO 密集 2 即可
+    PHASE3_WORKERS: int = 2         # CPU 场景不超过核心数/2
     DB_BUSY_TIMEOUT: int = 120000
 
     # ── GPU / SBERT ──
-    USE_GPU: bool = False
-    SBERT_DEVICE: str = "auto"     # auto → 自动检测 CUDA / MPS / CPU
-    SBERT_BATCH_SIZE: int = 64
+    USE_GPU: bool = False            # CPU 服务器不使用 GPU
+    SBERT_DEVICE: str = "cpu"        # 强制 CPU，不自动检测 CUDA
+    SBERT_BATCH_SIZE: int = 32       # CPU 场景减小批处理，降低内存
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
     ENABLE_EMBEDDING_CACHE: bool = True
     EMBEDDING_DIM: int = 384
-    EMBED_WORKERS: int = 2
+    EMBED_WORKERS: int = 1           # CPU 上单进程即可
 
     # ── 文档预筛 ──
     DOC_VECTOR_FILTER_ENABLED: bool = True
@@ -92,16 +92,20 @@ class DetectionConfig:
 
     # ── OCR ──
     ENABLE_OCR: bool = True
-    OCR_ENGINE: str = "easyocr"
+    OCR_ENGINE: str = "paddleocr"      # PaddleOCR 中文识别快，CPU 友好
     OCR_LANGUAGES: list = None
-    OCR_SAMPLE_STEP: int = 1
+    OCR_SAMPLE_STEP: int = 2          # CPU 场景隔页采样，耗时减半
     OCR_MIN_CONFIDENCE: float = 0.3
-    OCR_WORKERS: int = 4
+    OCR_WORKERS: int = 1              # CPU 场景单进程 OCR，多进程争 CPU 反而慢
     OCR_MODEL_DIR: Optional[str] = None
     OCR_OFFLINE_MODE: bool = False
     PADDLEOCR_HOME: Optional[str] = None
     OCR_RETRY_COUNT: int = 3
     ENGINE_INIT_TIMEOUT: int = 120
+
+    # ── 技术标/商务标维度过滤（管线仅处理指定维度）──
+    # "all" = 全部页面, "technical" = 仅技术标页, "commercial" = 仅商务标页
+    ANALYSIS_DIMENSION: str = "all"
 
     # ── 图片 ──
     IMAGE_MIN_SIZE: int = 50

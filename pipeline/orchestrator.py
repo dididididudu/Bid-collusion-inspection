@@ -39,7 +39,7 @@ from scoring import RiskScoringEngine
 from report import ReportGenerator
 from pipeline.evidence_builder import (
     build_metadata_evidence, build_image_evidence, build_text_evidence,
-    build_contact_evidence,
+    build_contact_evidence, _get_image_dimension_tag,
 )
 from pipeline.ocr_helpers import ocr_pages, aggregate_ocr_paragraphs
 from extraction.contact_extractor import extract_contacts_from_sqlite
@@ -230,6 +230,11 @@ class BidDetectionOrchestrator:
                 extract_time = (datetime.now() - extract_start).total_seconds()
                 logger.info(f"Phase 1 完成: {processed_count}/{len(unprocessed)} 个文档, 耗时 {extract_time:.2f}s")
 
+            # ── Phase 1.2: TOC 解析（技术标/商务标分界）──
+            if state.phase < 3 and self.config.ENABLED_DIMENSIONS.get('content_similarity', True):
+                self._phase_toc_parse(state)
+
+            # ── Phase 1.5: SBERT 嵌入 ──
             if state.phase < 3 and self.config.ENABLED_DIMENSIONS.get('content_similarity', True):
                 self._phase_embed(state)
 
@@ -699,6 +704,63 @@ class BidDetectionOrchestrator:
             self.cache.store_document(feature)
         return len(paragraphs)
 
+    def _phase_toc_parse(self, state) -> None:
+        """Phase 1.2: TOC 解析 — 识别技术标/商务标分界
+
+        对每个文档运行 TOCParser，将 page_classifications 存入缓存。
+        """
+        from pipeline.toc_parser import TOCParser
+
+        features = self.cache.load_all_documents()
+        if not features:
+            logger.info("Phase 1.2: 无文档可分析")
+            return
+
+        logger.info(f"Phase 1.2: TOC 解析 ({len(features)} 个文档)...")
+        parse_start = datetime.now()
+        parsed_count = 0
+
+        for feat in features:
+            if feat.page_count <= 0:
+                continue
+            try:
+                paragraphs_full = self.cache.load_all_paragraphs_full(feat.doc_id)
+                if not paragraphs_full:
+                    continue
+
+                paras = []
+                page_nums = []
+                for idx in sorted(paragraphs_full.keys()):
+                    info = paragraphs_full[idx]
+                    paras.append(info.get('text', ''))
+                    page_nums.append(info.get('page_num', -1))
+
+                parser = TOCParser(
+                    paragraphs=paras,
+                    paragraph_page_nums=page_nums,
+                    total_pages=feat.page_count,
+                )
+                result = parser.parse()
+
+                if result['page_classifications']:
+                    feat.page_classifications = result['page_classifications']
+                    parsed_count += 1
+                    self.cache.store_document(feat)
+                    logger.info(
+                        f"  [{feat.filename}] method={result.get('method','?')}, "
+                        f"tech_start={result.get('tech_start_page', -1)}, "
+                        f"classified={len(result['page_classifications'])} pages"
+                    )
+                else:
+                    logger.debug(f"  [{feat.filename}] 未检测到技术标分界")
+
+            except Exception as e:
+                logger.error(f"TOC 解析失败 ({feat.filename}): {e}", exc_info=True)
+                continue
+
+        elapsed = (datetime.now() - parse_start).total_seconds()
+        logger.info(f"Phase 1.2 完成: {parsed_count}/{len(features)} 个文档已分类, 耗时 {elapsed:.2f}s")
+
     def _phase_embed(self, state) -> None:
         logger.info("Phase 1.5: 全局 SBERT 嵌入编码...")
         embed_start = datetime.now()
@@ -724,12 +786,25 @@ class BidDetectionOrchestrator:
         if not embed_doc_ids:
             logger.info("Phase 1.5: 没有需要编码的文档")
         else:
+            dimension = self.config.ANALYSIS_DIMENSION
+            if dimension in ("technical", "commercial"):
+                logger.info(f"Phase 1.5: 仅编码 {dimension} 页面段落")
             logger.info(f"Phase 1.5 单进程模式: 编码 {len(embed_doc_ids)} 个文档")
             for doc_feat in features:
                 if not doc_feat.doc_minhash:
                     continue
                 try:
-                    paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
+                    if dimension in ("technical", "commercial"):
+                        # 按维度过滤段落：只保留指定维度的页面
+                        para_full = self.cache.load_all_paragraphs_full(doc_feat.doc_id)
+                        pages = getattr(doc_feat, 'page_classifications', {}) or {}
+                        paragraphs = []
+                        for idx, info in sorted(para_full.items()):
+                            page_num = info.get('page_num', -1)
+                            if pages.get(page_num, 'unknown') == dimension:
+                                paragraphs.append(info.get('text', ''))
+                    else:
+                        paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
                     if paragraphs:
                         count = engine.encode_document(doc_feat.doc_id, paragraphs, self.cache)
                         total_paragraphs += count
@@ -746,6 +821,43 @@ class BidDetectionOrchestrator:
         if doc_id not in self._phase3_para_cache:
             self._phase3_para_cache[doc_id] = self.cache.load_all_paragraphs_full(doc_id)
         return self._phase3_para_cache[doc_id]
+
+    def _filter_para_full_by_dimension(
+        self, para_full: Dict[int, dict], doc
+    ) -> Dict[int, dict]:
+        """过滤段落字典，仅保留指定维度的页面"""
+        dimension = self.config.ANALYSIS_DIMENSION
+        if dimension not in ("technical", "commercial"):
+            return para_full
+        pages = getattr(doc, 'page_classifications', {}) or {}
+        return {
+            idx: info for idx, info in para_full.items()
+            if pages.get(info.get('page_num', -1), 'unknown') == dimension
+        }
+
+    def _filter_hashes_by_dimension(self, hashes, doc) -> list:
+        """过滤图片哈希列表，仅保留指定维度的页面
+
+        哈希格式: "page_N:..."
+        """
+        dimension = self.config.ANALYSIS_DIMENSION
+        if dimension not in ("technical", "commercial"):
+            return hashes
+        pages = getattr(doc, 'page_classifications', {}) or {}
+        if not pages:
+            return hashes
+        filtered = []
+        for h in (hashes or []):
+            if h.startswith('page_'):
+                try:
+                    page_num = int(h.split(':')[0].split('_')[1])
+                    if pages.get(page_num, 'unknown') == dimension:
+                        filtered.append(h)
+                except (ValueError, IndexError):
+                    filtered.append(h)
+            else:
+                filtered.append(h)
+        return filtered
 
     def _phase3_analyze_single(self, doc_a_id: str, doc_b_id: str):
         doc_a = self.cache.load_document(doc_a_id)
@@ -778,13 +890,34 @@ class BidDetectionOrchestrator:
             dims = self.config.ENABLED_DIMENSIONS
             paragraph_matches = []
             if dims.get('content_similarity', True):
-                paragraph_matches = self.paragraph_matcher.match(
-                    doc_a, doc_b, self.cache,
-                    para_full_a=self._get_para_full(doc_a_id),
-                    para_full_b=self._get_para_full(doc_b_id),
-                )
+                # 按维度过滤段落数据（仅保留技术标或商务标页面）
+                para_full_a = self._filter_para_full_by_dimension(
+                    self._get_para_full(doc_a_id), doc_a)
+                para_full_b = self._filter_para_full_by_dimension(
+                    self._get_para_full(doc_b_id), doc_b)
+                if not para_full_a or not para_full_b:
+                    logger.info(f"维度过滤后无段落可匹配 ({doc_a.filename} vs {doc_b.filename})")
+                else:
+                    paragraph_matches = self.paragraph_matcher.match(
+                        doc_a, doc_b, self.cache,
+                        para_full_a=para_full_a,
+                        para_full_b=para_full_b,
+                    )
+
+            # 按维度过滤图片哈希（仅保留指定页面的图片）
+            dimension = self.config.ANALYSIS_DIMENSION
+            if dimension in ("technical", "commercial"):
+                orig_ha = doc_a.image_hashes
+                orig_hb = doc_b.image_hashes
+                doc_a.image_hashes = self._filter_hashes_by_dimension(orig_ha, doc_a)
+                doc_b.image_hashes = self._filter_hashes_by_dimension(orig_hb, doc_b)
 
             evidence = self._build_evidence(doc_a, doc_b, paragraph_matches)
+
+            # 恢复原始图片哈希（不影响缓存）
+            if dimension in ("technical", "commercial"):
+                doc_a.image_hashes = orig_ha
+                doc_b.image_hashes = orig_hb
 
             result = PairwiseResult(
                 pair_id=pair_id,
@@ -925,6 +1058,12 @@ class BidDetectionOrchestrator:
                 'l1_pass': v.l1_pass,
                 'l2_pass': v.l2_pass,
                 'l3_pass': v.l3_pass,
+                # 维度标签
+                'page_a': v.sig_a.page_num,
+                'page_b': v.sig_b.page_num,
+                '_dimension_tag': _get_image_dimension_tag(
+                    v.sig_a.page_num, v.sig_b.page_num, doc_a, doc_b
+                ),
             })
         evidence.matched_text_pairs = match_result.text_matches
         evidence.ps_detail_list = match_result.ps_details
@@ -955,9 +1094,22 @@ class BidDetectionOrchestrator:
         pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
         dims = self.config.ENABLED_DIMENSIONS
 
+        # 按维度过滤图片哈希
+        dimension = self.config.ANALYSIS_DIMENSION
+        if dimension in ("technical", "commercial"):
+            orig_ha = doc_a.image_hashes
+            orig_hb = doc_b.image_hashes
+            doc_a.image_hashes = self._filter_hashes_by_dimension(orig_ha, doc_a)
+            doc_b.image_hashes = self._filter_hashes_by_dimension(orig_hb, doc_b)
+
         image_evidence = ImageEvidence()
         if dims.get('content_similarity', True):
             image_evidence = self._build_image_evidence(doc_a, doc_b)
+
+        # 恢复原始图片哈希
+        if dimension in ("technical", "commercial"):
+            doc_a.image_hashes = orig_ha
+            doc_b.image_hashes = orig_hb
 
         metadata_evidence = MetadataEvidence()
         if dims.get('file_id', True) or dims.get('author', True) or dims.get('editor', True):
