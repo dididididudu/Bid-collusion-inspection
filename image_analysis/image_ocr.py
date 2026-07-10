@@ -281,23 +281,42 @@ class ImageOCREngine:
         """初始化 OCR 引擎（带版本检测）"""
         t0 = time.time()
 
-        if self._engine == "paddleocr":
+        if self._engine == "rapidocr":
+            self._init_rapidocr()
+            if self._available:
+                self._init_time = time.time() - t0
+                return
+            logger.info("RapidOCR 不可用，回退到 PaddleOCR...")
+            self._init_paddleocr()
+            if not self._available:
+                self._cleanup_failed_modules()
+                logger.info("PaddleOCR 不可用，回退到 EasyOCR...")
+                self._init_easyocr()
+        elif self._engine == "paddleocr":
             self._init_paddleocr()
             if self._available:
                 self._init_time = time.time() - t0
                 return
             self._cleanup_failed_modules()
-            logger.info("PaddleOCR 不可用，回退到 EasyOCR...")
-            self._init_easyocr()
+            logger.info("PaddleOCR 不可用，回退到 RapidOCR...")
+            self._init_rapidocr()
+            if not self._available:
+                logger.info("RapidOCR 不可用，回退到 EasyOCR...")
+                self._init_easyocr()
         elif self._engine == "easyocr":
             self._init_easyocr()
             if self._available:
                 self._init_time = time.time() - t0
                 return
-            logger.info("EasyOCR 不可用，回退到 PaddleOCR...")
-            self._init_paddleocr()
+            logger.info("EasyOCR 不可用，回退到 RapidOCR...")
+            self._init_rapidocr()
+            if not self._available:
+                logger.info("RapidOCR 不可用，回退到 PaddleOCR...")
+                self._init_paddleocr()
         else:
-            self._init_paddleocr()
+            self._init_rapidocr()
+            if not self._available:
+                self._init_paddleocr()
             if not self._available:
                 self._cleanup_failed_modules()
                 self._init_easyocr()
@@ -439,6 +458,35 @@ class ImageOCREngine:
         except Exception as e:
             logger.warning(f"EasyOCR 初始化失败: {e}")
 
+    def _init_rapidocr(self):
+        """初始化 RapidOCR（ONNX Runtime，CPU 超快）
+
+        RapidOCR 使用 PaddleOCR 的 ONNX 模型，通过 ONNX Runtime 推理，
+        CPU 速度比 PaddleOCR 快 4-20 倍，安装体积仅 80MB。
+        """
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            
+            # RapidOCR 参数
+            # - use_det: 是否启用文字检测（True）
+            # - use_cls: 是否启用方向分类（False，加速）
+            # - use_rec: 是否启用文字识别（True）
+            self._reader = RapidOCR(
+                use_det=True,
+                use_cls=False,
+                use_rec=True,
+            )
+            self._engine_type = 'rapidocr'
+            self._available = True
+            logger.info(
+                f"RapidOCR 引擎已初始化 (ONNX Runtime, "
+                f"CPU 加速, 安装体积 ~80MB)"
+            )
+        except ImportError:
+            logger.debug("RapidOCR 未安装 (pip install rapidocr-onnxruntime)")
+        except Exception as e:
+            logger.warning(f"RapidOCR 初始化失败: {e}")
+
     # ================================================================
     # OCR 提取（带重试）
     # ================================================================
@@ -486,7 +534,9 @@ class ImageOCREngine:
         last_error = None
         for attempt in range(self._retry_count + 1):
             try:
-                if self._engine_type == 'easyocr':
+                if self._engine_type == 'rapidocr':
+                    return self._extract_rapidocr(image)
+                elif self._engine_type == 'easyocr':
                     return self._extract_easyocr(image)
                 elif self._engine_type == 'paddleocr':
                     return self._extract_paddleocr(image)
@@ -511,7 +561,7 @@ class ImageOCREngine:
         images: List['np.ndarray'],
         min_confidence: float = 0.3,
     ) -> List['OCRResult']:
-        """批量 OCR 推理 — PaddleOCR 原生支持，EasyOCR 逐张调用
+        """批量 OCR 推理 — PaddleOCR 原生支持，EasyOCR/RapidOCR 逐张调用
 
         GPU Manager 调用此方法处理一批图片。
         切换引擎时对调用方完全透明。
@@ -529,7 +579,9 @@ class ImageOCREngine:
         if not self.is_available:
             return [OCRResult() for _ in images]
 
-        if self._engine_type == 'paddleocr':
+        if self._engine_type == 'rapidocr':
+            return self._extract_rapidocr_batch(images, min_confidence)
+        elif self._engine_type == 'paddleocr':
             return self._extract_paddleocr_batch(images, min_confidence)
         elif self._engine_type == 'easyocr':
             return self._extract_easyocr_batch(images, min_confidence)
@@ -685,6 +737,62 @@ class ImageOCREngine:
             bboxes=bboxes,
             confidence=avg_conf,
         )
+
+    def _extract_rapidocr(self, image: np.ndarray) -> OCRResult:
+        """RapidOCR 提取（ONNX Runtime，CPU 超快）
+
+        RapidOCR 返回格式: (bbox_list, text_list, confidence_list)
+        或 None（无文字时）
+        """
+        result, _ = self._reader(image)
+
+        if not result:
+            return OCRResult()
+
+        texts = []
+        words = []
+        bboxes = []
+        confidences = []
+
+        for item in result:
+            bbox_coords, text, conf = item[0], item[1], item[2]
+            if text and len(text.strip()) > 0:
+                texts.append(text.strip())
+                words.extend(text.strip().split())
+                if isinstance(bbox_coords, list) and len(bbox_coords) >= 2:
+                    x_coords = [p[0] for p in bbox_coords]
+                    y_coords = [p[1] for p in bbox_coords]
+                    bboxes.append({
+                        'text': text.strip(),
+                        'x': int(min(x_coords)),
+                        'y': int(min(y_coords)),
+                        'w': int(max(x_coords) - min(x_coords)),
+                        'h': int(max(y_coords) - min(y_coords)),
+                    })
+                confidences.append(float(conf) if conf else 0.0)
+
+        full_text = '\n'.join(texts)
+        avg_conf = float(np.mean(confidences)) if confidences else 0.0
+
+        return OCRResult(
+            text=full_text,
+            words=words,
+            bboxes=bboxes,
+            confidence=avg_conf,
+        )
+
+    def _extract_rapidocr_batch(
+        self, images: List['np.ndarray'], min_confidence: float
+    ) -> List['OCRResult']:
+        """RapidOCR 批量 — 逐张调用（RapidOCR 无原生 batch API）"""
+        results = []
+        for img in images:
+            img = self._preprocess_image(img)
+            result = self._extract_rapidocr(img)
+            if result.confidence < min_confidence:
+                result = OCRResult()
+            results.append(result)
+        return results
 
     def _extract_paddleocr(self, image: np.ndarray) -> OCRResult:
         """PaddleOCR 提取（仅文字识别，无检测）
