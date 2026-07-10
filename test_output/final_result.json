@@ -1,0 +1,12 @@
+FILE_CODE_SIMILAR                   ID=501: SUCCESS 未发现文件码雷同
+FILE_CODE_SIMILAR                   ID=502: SUCCESS 未发现文件码雷同
+EDITOR_SIGNER_SIMILAR               ID=501: FAILED  编辑经办人与 1 家公司雷同
+  evidence: {"editor": "Microsoft® Word 2021", "similarCompanyRecordIds": [502]}
+EDITOR_SIGNER_SIMILAR               ID=502: FAILED  编辑经办人与 1 家公司雷同
+  evidence: {"editor": "Microsoft® Word 2021", "similarCompanyRecordIds": [501]}
+DOC_AUTHOR_SIMILAR                  ID=501: SUCCESS 未发现文档作者雷同
+DOC_AUTHOR_SIMILAR                  ID=502: SUCCESS 未发现文档作者雷同
+BID_COMPANY_NAME_ABNORMAL           ID=501: SUCCESS 未发现公司名称异常
+BID_COMPANY_NAME_ABNORMAL           ID=502: SUCCESS 未发现公司名称异常
+SAME_BID_CONTACT_SIMILAR            ID=501: SUCCESS 未发现联系人信息雷同
+SAME_BID_CONTACT_SIMILAR            ID=502: SUCCESS 未发现联系人信息雷同

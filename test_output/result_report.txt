@@ -1,0 +1,20 @@
+FILE_CODE_SIMILAR                   ['SUCCESS', 'SUCCESS']
+    ID=501: SUCCESS 未发现文件码雷同
+    ID=502: SUCCESS 未发现文件码雷同
+EDITOR_SIGNER_SIMILAR               ['FAILED', 'FAILED']
+    ID=501: FAILED  编辑经办人与 1 家公司雷同
+    evidence: {"editor": "Microsoft® Word 2021", "similarCompanyRecordIds": [502]}
+    ID=502: FAILED  编辑经办人与 1 家公司雷同
+    evidence: {"editor": "Microsoft® Word 2021", "similarCompanyRecordIds": [501]}
+DOC_AUTHOR_SIMILAR                  ['SUCCESS', 'SUCCESS']
+    ID=501: SUCCESS 未发现文档作者雷同
+    ID=502: SUCCESS 未发现文档作者雷同
+BID_COMPANY_NAME_ABNORMAL           ['SUCCESS', 'SUCCESS']
+    ID=501: SUCCESS 未发现公司名称异常
+    ID=502: SUCCESS 未发现公司名称异常
+SAME_BID_CONTACT_SIMILAR            ['FAILED', 'FAILED']
+    ID=501: FAILED  人名与 1 家公司雷同
+    evidence: {"commonPersons": ["名称"], "similarCompanyRecordIds": [502]}
+    ID=502: FAILED  人名与 1 家公司雷同
+    evidence: {"commonPersons": ["名称"], "similarCompanyRecordIds": [501]}
+---done---

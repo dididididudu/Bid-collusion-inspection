@@ -1,0 +1,13 @@
+投标文件-雀翼0828.pdf:
+  author:   12947
+  creator:  Microsoft® Word 2021
+  producer: Microsoft® Word 2021
+  title:    
+
+投标文件.pdf:
+  author:   Administrator
+  creator:  Microsoft® Word 2021
+  producer: Microsoft® Word 2021
+  title:    
+
+done

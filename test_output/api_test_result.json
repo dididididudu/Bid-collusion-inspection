@@ -1,0 +1,150 @@
+{
+  "test_time": "2026-07-10 13:20:01",
+  "api_url": "http://localhost:8001",
+  "batch_id": 1900000002,
+  "test_files": {
+    "501": "投标文件-雀翼0828.pdf",
+    "502": "投标文件.pdf"
+  },
+  "results": {
+    "FILE_CODE_SIMILAR": {
+      "batchId": 1900000002,
+      "itemCode": "FILE_CODE_SIMILAR",
+      "itemName": "文件码雷同",
+      "results": [
+        {
+          "companyRecordId": 501,
+          "registrationCompanyId": 101,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现文件码雷同",
+          "evidence": {}
+        },
+        {
+          "companyRecordId": 502,
+          "registrationCompanyId": 102,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现文件码雷同",
+          "evidence": {}
+        }
+      ]
+    },
+    "EDITOR_SIGNER_SIMILAR": {
+      "batchId": 1900000002,
+      "itemCode": "EDITOR_SIGNER_SIMILAR",
+      "itemName": "编辑经办人雷同",
+      "results": [
+        {
+          "companyRecordId": 501,
+          "registrationCompanyId": 101,
+          "sectionId": 11,
+          "status": "FAILED",
+          "summary": "编辑经办人与 1 家公司雷同",
+          "evidence": {
+            "editor": "Microsoft® Word 2021",
+            "similarCompanyRecordIds": [
+              502
+            ]
+          }
+        },
+        {
+          "companyRecordId": 502,
+          "registrationCompanyId": 102,
+          "sectionId": 11,
+          "status": "FAILED",
+          "summary": "编辑经办人与 1 家公司雷同",
+          "evidence": {
+            "editor": "Microsoft® Word 2021",
+            "similarCompanyRecordIds": [
+              501
+            ]
+          }
+        }
+      ]
+    },
+    "DOC_AUTHOR_SIMILAR": {
+      "batchId": 1900000002,
+      "itemCode": "DOC_AUTHOR_SIMILAR",
+      "itemName": "文档作者雷同",
+      "results": [
+        {
+          "companyRecordId": 501,
+          "registrationCompanyId": 101,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现文档作者雷同",
+          "evidence": {}
+        },
+        {
+          "companyRecordId": 502,
+          "registrationCompanyId": 102,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现文档作者雷同",
+          "evidence": {}
+        }
+      ]
+    },
+    "BID_COMPANY_NAME_ABNORMAL": {
+      "batchId": 1900000002,
+      "itemCode": "BID_COMPANY_NAME_ABNORMAL",
+      "itemName": "投标文件公司名称异常",
+      "results": [
+        {
+          "companyRecordId": 501,
+          "registrationCompanyId": 101,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现公司名称异常",
+          "evidence": {}
+        },
+        {
+          "companyRecordId": 502,
+          "registrationCompanyId": 102,
+          "sectionId": 11,
+          "status": "SUCCESS",
+          "summary": "未发现公司名称异常",
+          "evidence": {}
+        }
+      ]
+    },
+    "SAME_BID_CONTACT_SIMILAR": {
+      "batchId": 1900000002,
+      "itemCode": "SAME_BID_CONTACT_SIMILAR",
+      "itemName": "同标段单位联系人雷同",
+      "results": [
+        {
+          "companyRecordId": 501,
+          "registrationCompanyId": 101,
+          "sectionId": 11,
+          "status": "FAILED",
+          "summary": "人名与 1 家公司雷同",
+          "evidence": {
+            "commonPersons": [
+              "名称"
+            ],
+            "similarCompanyRecordIds": [
+              502
+            ]
+          }
+        },
+        {
+          "companyRecordId": 502,
+          "registrationCompanyId": 102,
+          "sectionId": 11,
+          "status": "FAILED",
+          "summary": "人名与 1 家公司雷同",
+          "evidence": {
+            "commonPersons": [
+              "名称"
+            ],
+            "similarCompanyRecordIds": [
+              501
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
