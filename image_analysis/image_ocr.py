@@ -593,12 +593,15 @@ class ImageOCREngine:
     ) -> List['OCRResult']:
         """EasyOCR 批量 — 逐张调用（EasyOCR 无原生 batch）"""
         results = []
-        for img in images:
+        total = len(images)
+        for idx, img in enumerate(images):
             img = self._preprocess_image(img)
             result = self._extract_easyocr(img)
             if result.confidence < min_confidence:
                 result = OCRResult()
             results.append(result)
+            if (idx + 1) % max(1, total // 10) == 0 or idx + 1 == total:
+                logger.info(f"OCR (EasyOCR): {idx + 1}/{total} 完成")
         return results
 
     def _extract_paddleocr_batch(
@@ -610,10 +613,11 @@ class ImageOCREngine:
         PaddleOCR 2.x: ocr(list_of_images) 一次性推理
         """
         paddle_version = getattr(self, '_paddle_version', 2)
+        total = len(images)
 
         if paddle_version >= 3:
             raw_list = []
-            for img in images:
+            for idx, img in enumerate(images):
                 img = self._preprocess_image(img)
                 try:
                     raw = self._reader.predict(img)
@@ -621,11 +625,14 @@ class ImageOCREngine:
                 except Exception as e:
                     logger.debug(f"PaddleOCR 3.x 单张预测失败: {e}")
                     raw_list.append(None)
+                if (idx + 1) % max(1, total // 10) == 0 or idx + 1 == total:
+                    logger.info(f"OCR (PaddleOCR): {idx + 1}/{total} 完成")
         else:
             processed_images = [self._preprocess_image(img) for img in images]
             raw_list = self._reader.ocr(processed_images, cls=False)
             if raw_list is None:
                 raw_list = [None] * len(images)
+            logger.info(f"OCR (PaddleOCR): {total}/{total} 完成")
 
         results = []
         for raw in raw_list:
@@ -786,12 +793,15 @@ class ImageOCREngine:
     ) -> List['OCRResult']:
         """RapidOCR 批量 — 逐张调用（RapidOCR 无原生 batch API）"""
         results = []
-        for img in images:
+        total = len(images)
+        for idx, img in enumerate(images):
             img = self._preprocess_image(img)
             result = self._extract_rapidocr(img)
             if result.confidence < min_confidence:
                 result = OCRResult()
             results.append(result)
+            if (idx + 1) % max(1, total // 10) == 0 or idx + 1 == total:
+                logger.info(f"OCR (RapidOCR): {idx + 1}/{total} 完成")
         return results
 
     def _extract_paddleocr(self, image: np.ndarray) -> OCRResult:

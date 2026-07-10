@@ -125,18 +125,26 @@ class HealthChecker:
     def check_ocr_engine(self) -> tuple:
         try:
             from image_analysis.image_ocr import ImageOCREngine
-            engine = ImageOCREngine(use_gpu=False, engine='paddleocr')
+            from config import load_config
+            
+            config = load_config()
+            engine_type = config.OCR_ENGINE
+            
+            engine = ImageOCREngine(use_gpu=False, engine=engine_type)
             if engine.is_available:
                 ok, msg = engine.health_check()
                 if ok:
-                    return True, f"PaddleOCR: {msg}"
+                    return True, f"{engine_type}: {msg}"
                 else:
-                    # 尝试 EasyOCR
-                    engine2 = ImageOCREngine(use_gpu=False, engine='easyocr')
-                    if engine2.is_available:
-                        ok2, msg2 = engine2.health_check()
-                        if ok2:
-                            return True, f"EasyOCR (回退): {msg2}"
+                    fallback_order = ['rapidocr', 'paddleocr', 'easyocr']
+                    for fallback in fallback_order:
+                        if fallback == engine_type:
+                            continue
+                        engine2 = ImageOCREngine(use_gpu=False, engine=fallback)
+                        if engine2.is_available:
+                            ok2, msg2 = engine2.health_check()
+                            if ok2:
+                                return True, f"{fallback} (回退): {msg2}"
                     return False, msg
             return False, "所有 OCR 引擎均不可用"
         except Exception as e:

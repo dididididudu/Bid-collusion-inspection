@@ -177,7 +177,7 @@ def ocr_pages(
     if not force:
         existing_ocr = cache.load_image_ocr_results(doc_id)
         if existing_ocr:
-            logger.debug(f"OCR: {os.path.basename(file_path)} 已有 {len(existing_ocr)} 条结果，跳过")
+            logger.info(f"OCR: {os.path.basename(file_path)} 已有 {len(existing_ocr)} 条结果，跳过")
             return len(existing_ocr)
 
     import fitz
@@ -273,7 +273,7 @@ def ocr_pages(
     if not crop_tasks:
         return 0
 
-    logger.debug(f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别")
+    logger.info(f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别")
 
     ocr_results = []
 
@@ -285,7 +285,7 @@ def ocr_pages(
              'min_conf': t[4], 'page_num': t[7]}
             for t in crop_tasks
         ]
-        logger.debug("OCR: 提交 %d 张图片到 GPU Manager", len(images))
+        logger.info("OCR: 提交 %d 张图片到 GPU Manager", len(images))
 
         batch_results, meta_list = gpu_manager.batch_ocr(images, metadata)
         for idx, (result, meta) in enumerate(zip(batch_results, meta_list)):
@@ -316,7 +316,7 @@ def ocr_pages(
                 if result.confidence >= mc and result.text.strip():
                     ocr_results.append((result, phash, img_w, img_h, page_n))
         else:
-            logger.debug(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
+            logger.info(f"OCR 并行模式: {num_workers} workers, {len(crop_tasks)} 张图")
             from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 future_map = {executor.submit(_ocr_crop_worker, task): task

@@ -16,3 +16,6 @@ paddlepaddle>=3.0.0
 paddleocr>=3.0.0
 
 easyocr>=1.7.0
+
+rapidocr-onnxruntime>=1.2.0
+python-dotenv>=1.0.0

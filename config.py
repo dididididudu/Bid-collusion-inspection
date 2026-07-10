@@ -9,6 +9,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+try:
+    from dotenv import load_dotenv
+    from pathlib import Path
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        logger.info(f"已加载配置文件: {env_path}")
+except ImportError:
+    logger.debug("python-dotenv 未安装，跳过 .env 加载")
+
 
 @dataclass
 class DetectionConfig:
@@ -16,7 +26,7 @@ class DetectionConfig:
 
     # ── 文本匹配 ──
     TEXT_LOCAL_THRESHOLD: float = 0.85
-    SBERT_BASE_THRESHOLD: float = 0.60
+    SBERT_BASE_THRESHOLD: float = 0.75
     SBERT_SHORT_PARAGRAPH_THRESHOLD: float = 0.80
     SBERT_SHORT_PARAGRAPH_LEN: int = 100
 
@@ -77,7 +87,7 @@ class DetectionConfig:
     # ── GPU / SBERT ──
     USE_GPU: bool = False            # CPU 服务器不使用 GPU
     SBERT_DEVICE: str = "cpu"        # 强制 CPU，不自动检测 CUDA
-    SBERT_BATCH_SIZE: int = 32       # CPU 场景减小批处理，降低内存
+    SBERT_BATCH_SIZE: int = 64       # CPU 场景批处理（64 充分利用 SIMD）
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
     ENABLE_EMBEDDING_CACHE: bool = True
@@ -89,12 +99,12 @@ class DetectionConfig:
 
     # ── 文档预筛 ──
     DOC_VECTOR_FILTER_ENABLED: bool = True
-    DOC_VECTOR_THRESHOLD: float = 0.3
+    DOC_VECTOR_THRESHOLD: float = 0.15
     METADATA_FILTER_ENABLED: bool = True
     TIME_BUCKET_FORMAT: str = "%Y-%m-%dT%H"
 
     # ── OCR ──
-    ENABLE_OCR: bool = True
+    ENABLE_OCR: bool = False
     OCR_ENGINE: str = "paddleocr"      # PaddleOCR 中文识别快，CPU 友好
     OCR_LANGUAGES: list = None
     OCR_SAMPLE_STEP: int = 2          # CPU 场景隔页采样，耗时减半
@@ -175,6 +185,44 @@ class DetectionConfig:
             pass
 
     def _apply_env_overrides(self):
+        env_ocr_engine = os.environ.get('OCR_ENGINE', '').lower()
+        if env_ocr_engine in ('rapidocr', 'paddleocr', 'easyocr'):
+            self.OCR_ENGINE = env_ocr_engine
+            logger.info(f"OCR_ENGINE 从环境变量加载: {self.OCR_ENGINE}")
+        
+        env_use_gpu = os.environ.get('USE_GPU', '').lower()
+        if env_use_gpu in ('true', '1', 'yes'):
+            self.USE_GPU = True
+            logger.info("USE_GPU 从环境变量加载: True")
+        elif env_use_gpu in ('false', '0', 'no'):
+            self.USE_GPU = False
+            logger.info("USE_GPU 从环境变量加载: False")
+        
+        env_sbert_device = os.environ.get('SBERT_DEVICE', '').lower()
+        if env_sbert_device in ('cpu', 'cuda', 'mps'):
+            self.SBERT_DEVICE = env_sbert_device
+            logger.info(f"SBERT_DEVICE 从环境变量加载: {self.SBERT_DEVICE}")
+        
+        env_ocr_workers = os.environ.get('OCR_WORKERS', '')
+        if env_ocr_workers.isdigit():
+            self.OCR_WORKERS = int(env_ocr_workers)
+            logger.info(f"OCR_WORKERS 从环境变量加载: {self.OCR_WORKERS}")
+        
+        env_ocr_batch_size = os.environ.get('OCR_BATCH_SIZE', '')
+        if env_ocr_batch_size.isdigit():
+            self.OCR_BATCH_SIZE = int(env_ocr_batch_size)
+            logger.info(f"OCR_BATCH_SIZE 从环境变量加载: {self.OCR_BATCH_SIZE}")
+        
+        env_phase1 = os.environ.get('PHASE1_WORKERS', '')
+        if env_phase1.isdigit():
+            self.PHASE1_WORKERS = int(env_phase1)
+            logger.info(f"PHASE1_WORKERS 从环境变量加载: {self.PHASE1_WORKERS}")
+        
+        env_phase3 = os.environ.get('PHASE3_WORKERS', '')
+        if env_phase3.isdigit():
+            self.PHASE3_WORKERS = int(env_phase3)
+            logger.info(f"PHASE3_WORKERS 从环境变量加载: {self.PHASE3_WORKERS}")
+        
         if self.PADDLEOCR_HOME is None:
             env_home = os.environ.get('PADDLEOCR_HOME', '')
             if env_home:

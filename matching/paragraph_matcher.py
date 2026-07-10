@@ -8,6 +8,7 @@ Stage 2b: SBERT semantic verification (finds reworded/synonymous content)
 
 import logging
 import jieba
+from difflib import SequenceMatcher
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
@@ -148,26 +149,28 @@ class ParagraphMatcher:
                     union = words_a | words_b
                     word_jaccard = len(intersection) / len(union) if union else 0
 
-                    if word_jaccard >= 0.75:
-                        # High text overlap -> confirm directly (no SBERT needed)
+                    text_a = para_texts_a.get(i, '')
+                    text_b = para_texts_b.get(j, '')
+                    seq_ratio = SequenceMatcher(None, text_a, text_b).ratio() if text_a and text_b else 0.0
+
+                    if seq_ratio > 0.85:
                         exact_matches.append({
-                            'similarity': word_jaccard,
+                            'similarity': seq_ratio,
                             'paragraph_a_index': i,
                             'paragraph_b_index': j,
                             'page_num_a': para_full_a.get(i, {}).get('page_num', -1),
                             'page_num_b': para_full_b.get(j, {}).get('page_num', -1),
                             'detection_method': 'Exact-Jaccard',
-                            'paragraph_a': para_texts_a.get(i, ''),
-                            'paragraph_b': para_texts_b.get(j, ''),
+                            'paragraph_a': text_a,
+                            'paragraph_b': text_b,
                             'is_continuous_clone': False,
                             'continuous_clone_group_id': '',
                             'highlighted_text_a': '',
                             'highlighted_text_b': '',
                             'common_parts': [],
                         })
-                    elif word_jaccard >= 0.15:
-                        # Medium similarity -> send to SBERT
-                        semantic_candidates.append((i, j, word_jaccard))
+                    elif seq_ratio >= 0.4:
+                        semantic_candidates.append((i, j, seq_ratio))
 
                 logger.info(
                     f"Stage 2a (Jaccard): {len(exact_matches)} exact matches, "
@@ -261,7 +264,45 @@ class ParagraphMatcher:
             f"Stage 2 results: {vc_count} candidates -> {len(stage2_results)} matches"
         )
 
+        self._mark_continuous_clones(stage2_results)
+
         return stage2_results
+
+    def _mark_continuous_clones(self, results: List[Dict]) -> None:
+        """标记连续克隆块（超过3个连续相似段落）"""
+        if len(results) < 3:
+            return
+
+        sorted_results = sorted(results, key=lambda x: x['paragraph_a_index'])
+
+        clone_group_id = 0
+        run_start = 0
+        run_len = 1
+
+        for i in range(1, len(sorted_results)):
+            prev = sorted_results[i - 1]
+            curr = sorted_results[i]
+            if (curr['paragraph_a_index'] == prev['paragraph_a_index'] + 1 and
+                    curr['paragraph_b_index'] == prev['paragraph_b_index'] + 1):
+                run_len += 1
+            else:
+                if run_len >= 3:
+                    clone_group_id += 1
+                    for k in range(run_start, run_start + run_len):
+                        sorted_results[k]['is_continuous_clone'] = True
+                        sorted_results[k]['continuous_clone_group_id'] = f'clone_{clone_group_id}'
+                run_start = i
+                run_len = 1
+
+        if run_len >= 3:
+            clone_group_id += 1
+            for k in range(run_start, run_start + run_len):
+                sorted_results[k]['is_continuous_clone'] = True
+                sorted_results[k]['continuous_clone_group_id'] = f'clone_{clone_group_id}'
+
+        clone_count = sum(1 for r in results if r.get('is_continuous_clone'))
+        if clone_count > 0:
+            logger.info(f"连续克隆块检测: {clone_count} 个段落属于连续克隆块")
 
     def _stage1_vectorized_minhash(
         self,

@@ -37,10 +37,9 @@ pip install --upgrade -q pip setuptools wheel
 # ── 3. 安装依赖 ──
 echo ""
 echo "[3/6] 安装 Python 依赖..."
-pip install -r requirements.txt -q
-pip install paddleocr==2.10.0 -q
-pip install fastapi uvicorn requests pydantic -q
-pip install sentence-transformers==3.0.1 -q
+pip install -r requirements-cpu.txt -q
+pip install -r deploy/requirements.api.txt -q
+pip install gunicorn -q
 echo "  ✅ 依赖安装完成"
 
 # ── 4. 模型验证 ──
@@ -63,14 +62,12 @@ if [ $? -ne 0 ]; then
     echo "  ⚠️  本地 SBERT 模型不可用，首次运行将自动下载"
 fi
 
-echo "  ⏳ 检查 PaddleOCR 模型..."
+echo "  ⏳ 检查 RapidOCR 模型..."
 python -c "
-import os
-os.environ['PADDLEOCR_HOME'] = os.path.expanduser('~/.paddleocr')
-from paddleocr import PaddleOCR
-PaddleOCR(lang='ch', use_angle_cls=False, show_log=False, use_gpu=False, det=False, rec=True)
-print('  ✅ PaddleOCR 就绪')
-" 2>/dev/null || echo "  ⚠️  PaddleOCR 首次运行会自动下载"
+from rapidocr_onnxruntime import RapidOCR
+RapidOCR()
+print('  ✅ RapidOCR 就绪')
+" 2>/dev/null || echo "  ⚠️  RapidOCR 首次运行会自动下载"
 
 # ── 5. 健康检查 ──
 echo ""
@@ -95,9 +92,9 @@ User=$(whoami)
 WorkingDirectory=$PROJECT_DIR
 Environment="PATH=$PROJECT_DIR/.venv/bin"
 Environment="CUDA_VISIBLE_DEVICES="
-Environment="COLLUSIVE_HOST=0.0.0.0"
-Environment="COLLUSIVE_PORT=$PORT"
-ExecStart=$PROJECT_DIR/.venv/bin/python collusive_check_api.py
+Environment="BID_HOST=0.0.0.0"
+Environment="BID_PORT=$PORT"
+ExecStart=$PROJECT_DIR/.venv/bin/python api_server.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -117,6 +114,6 @@ echo "============================================"
 echo " 部署完成！"
 echo " API: http://0.0.0.0:$PORT"
 echo " 文档: http://0.0.0.0:$PORT/docs"
-echo " 检查: curl http://localhost:$PORT/api/v1/collusive-check/health"
+echo " 检查: curl http://localhost:$PORT/api/health"
 echo " 日志: sudo journalctl -u $SERVICE_NAME -f"
 echo "============================================"

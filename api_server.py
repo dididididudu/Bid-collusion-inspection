@@ -122,12 +122,18 @@ async def preload_models():
         logger.warning(f"  SBERT 本地加载失败（首次运行需要联网下载）: {e}")
         logger.info("  SBERT 将在 Phase 1.5 按需加载")
 
-    logger.info("[2/2] 加载 OCR 引擎 (EasyOCR)...")
+    logger.info("[2/2] 加载 OCR 引擎...")
     try:
+        from config import DetectionConfig
         from image_analysis.image_ocr import ImageOCREngine
-        engine = ImageOCREngine(use_gpu=False, engine='easyocr', offline=True)
+        _cfg = DetectionConfig()
+        engine = ImageOCREngine(
+            use_gpu=_cfg.USE_GPU,
+            engine=_cfg.OCR_ENGINE,
+            offline=_cfg.OCR_OFFLINE_MODE,
+        )
         ok = engine.is_available
-        logger.info(f"  OCR {'加载完成' if ok else '不可用'}")
+        logger.info(f"  OCR ({_cfg.OCR_ENGINE}) {'加载完成' if ok else '不可用'}")
     except Exception as e:
         logger.warning(f"  OCR 加载异常: {e}")
 
@@ -141,6 +147,24 @@ async def preload_models():
 
 _tasks = {}  # task_id -> TaskRecord
 _lock = threading.Lock()
+MAX_TASKS_IN_MEMORY = 100  # _tasks 字典最大容量
+
+def _cleanup_old_tasks():
+    """清理过旧的已完成/失败任务，防止 _tasks 字典无限增长"""
+    if len(_tasks) <= MAX_TASKS_IN_MEMORY:
+        return
+    with _lock:
+        if len(_tasks) <= MAX_TASKS_IN_MEMORY:
+            return
+        completed = [
+            (tid, t) for tid, t in _tasks.items()
+            if t.status in ("completed", "failed")
+        ]
+        completed.sort(key=lambda x: x[1].completed_at or "")
+        to_remove = len(_tasks) - MAX_TASKS_IN_MEMORY
+        for tid, _ in completed[:to_remove]:
+            _tasks.pop(tid, None)
+        logger.info(f"清理旧任务记录: 移除 {to_remove} 个, 剩余 {len(_tasks)} 个")
 
 # 最大并发检测任务数，超过则排队等待
 MAX_CONCURRENT_TASKS = 2
@@ -316,13 +340,12 @@ def _run_detection_impl(task_id: str):
 
         if record.content_similarity and _global_sbert_model is not None:
             try:
-                orchestrator.embedding_engine.model = _global_sbert_model
-                orchestrator.embedding_engine.is_available = True
-                if orchestrator.semantic_matcher:
-                    orchestrator.semantic_matcher.model = _global_sbert_model
-                    orchestrator.semantic_matcher.is_available = True
-            except Exception:
-                pass
+                orchestrator.embedding_engine.set_model(_global_sbert_model)
+                orchestrator.paragraph_matcher._ensure_semantic_matcher()
+                orchestrator.paragraph_matcher.semantic_matcher.set_model(_global_sbert_model)
+                logger.info("全局 SBERT 模型已注入 EmbeddingEngine 和 ParagraphMatcher")
+            except Exception as e:
+                logger.warning(f"SBERT 模型注入失败: {e}")
 
         report = orchestrator.detect(input_dir, output_dir)
         elapsed = time.time() - t0
@@ -363,6 +386,9 @@ def _run_detection_impl(task_id: str):
             if os.path.exists(path):
                 import shutil
                 shutil.rmtree(path, ignore_errors=True)
+
+        record.partial_results.clear()
+        _cleanup_old_tasks()
 
     except Exception as e:
         logger.exception(f"任务 {task_id[:8]} 失败: {e}")
@@ -446,22 +472,30 @@ async def get_dimensions():
     }
 
 
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 单文件 200MB
+
+
 @app.post("/api/detect", status_code=202)
 async def submit_detection(
     files: List[UploadFile] = File(..., description="PDF 文件列表"),
     content_similarity: bool = Form(True, description="是否启用内容相似度检测（文本+图片）"),
     use_gpu: bool = Form(False, description="是否启用 GPU 加速"),
-    ocr_engine: str = Form("easyocr", description="OCR 引擎 (easyocr / paddleocr)"),
+    ocr_engine: str = Form("", description="OCR 引擎 (rapidocr / paddleocr / easyocr)，留空则使用配置默认值"),
 ):
     """提交检测任务"""
-    # 过滤非 PDF 文件
     pdf_files = [f for f in files if f.filename and f.filename.lower().endswith(".pdf")]
     if not pdf_files:
         raise HTTPException(status_code=400, detail="请上传至少一个 PDF 文件")
     if len(pdf_files) < 2:
         raise HTTPException(status_code=400, detail="请上传至少 2 个 PDF 文件进行比较")
 
-    # 创建任务记录
+    if not ocr_engine:
+        try:
+            from config import DetectionConfig
+            ocr_engine = DetectionConfig().OCR_ENGINE
+        except Exception:
+            ocr_engine = "rapidocr"
+
     task_id = str(uuid.uuid4())
     options = {"use_gpu": use_gpu, "ocr_engine": ocr_engine}
     record = TaskRecord(task_id, content_similarity, options)
@@ -469,19 +503,25 @@ async def submit_detection(
     with _lock:
         _tasks[task_id] = record
 
-    # 创建工作目录
     input_dir = os.path.join(record.work_dir, "input")
     os.makedirs(input_dir, exist_ok=True)
 
-    # 保存上传的文件（取 basename 避免路径问题）
     for f in pdf_files:
         safe_name = os.path.basename(f.filename)
         file_path = os.path.join(input_dir, safe_name)
-        content = await f.read()
+        file_written = 0
         with open(file_path, "wb") as f_out:
-            f_out.write(content)
+            while True:
+                chunk = await f.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_written += len(chunk)
+                if file_written > MAX_FILE_SIZE:
+                    f_out.close()
+                    os.remove(file_path)
+                    raise HTTPException(status_code=413, detail=f"文件 {safe_name} 超过 200MB 限制")
+                f_out.write(chunk)
 
-    # 启动后台检测线程
     thread = threading.Thread(target=_run_detection, args=(task_id,), daemon=True)
     thread.start()
 

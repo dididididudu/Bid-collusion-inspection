@@ -175,10 +175,16 @@ class BidDetectionOrchestrator:
                     processed_count = 0
 
                     num_workers = min(
-                        self.config.PHASE1_WORKERS,
+                        max(1, self.config.PHASE1_WORKERS),
                         len(unprocessed),
                         os.cpu_count() or 4,
                     )
+                    if len(unprocessed) <= 5:
+                        num_workers = 1
+                    elif len(unprocessed) <= 20:
+                        num_workers = min(num_workers, 4)
+                    else:
+                        num_workers = min(num_workers, 8)
 
                     if num_workers <= 1:
                         for file_path in unprocessed:
@@ -289,10 +295,16 @@ class BidDetectionOrchestrator:
                     analyze_start = datetime.now()
                     total_pending = len(pending_pairs)
                     num_workers = min(
-                        self.config.PHASE3_WORKERS,
+                        max(1, self.config.PHASE3_WORKERS),
                         total_pending,
                         (os.cpu_count() or 4) * 2,
                     )
+                    if total_pending <= 3:
+                        num_workers = 1
+                    elif total_pending <= 20:
+                        num_workers = min(num_workers, 4)
+                    else:
+                        num_workers = min(num_workers, 8)
 
                     if num_workers <= 1:
                         for idx, (doc_a_id, doc_b_id) in enumerate(pending_pairs, 1):
@@ -322,12 +334,26 @@ class BidDetectionOrchestrator:
                         self.paragraph_matcher._ensure_semantic_matcher()
                         shared_matcher = self.paragraph_matcher.semantic_matcher
 
+                        all_doc_ids = set()
+                        for doc_a_id, doc_b_id in pending_pairs:
+                            all_doc_ids.add(doc_a_id)
+                            all_doc_ids.add(doc_b_id)
+                        preload_start = datetime.now()
+                        all_para_full = {}
+                        for did in all_doc_ids:
+                            try:
+                                all_para_full[did] = self.cache.load_all_paragraphs_full(did)
+                            except Exception as e:
+                                logger.warning(f"预加载段落失败 ({did[:12]}...): {e}")
+                        preload_time = (datetime.now() - preload_start).total_seconds()
+                        logger.info(f"Phase 3: 预加载 {len(all_para_full)}/{len(all_doc_ids)} 个文档段落, 耗时 {preload_time:.2f}s")
+
                         with ThreadPoolExecutor(max_workers=num_workers) as executor:
                             future_to_pair = {}
                             for doc_a_id, doc_b_id in pending_pairs:
                                 future = executor.submit(
                                     analyze_pair_worker,
-                                    (doc_a_id, doc_b_id, config_dict, db_dir, shared_matcher)
+                                    (doc_a_id, doc_b_id, config_dict, db_dir, shared_matcher, all_para_full)
                                 )
                                 future_to_pair[future] = (doc_a_id, doc_b_id)
 
@@ -696,7 +722,7 @@ class BidDetectionOrchestrator:
 
         import numpy as np
 
-        batch_size = max(32, self.config.SBERT_BATCH_SIZE)
+        batch_size = max(64, self.config.SBERT_BATCH_SIZE)
         accumulate_size = 512
 
         all_paragraphs = []

@@ -183,7 +183,7 @@ class GPUManager:
                     continue
                 count = self._run_batch_inference(engine, batch)
                 if count > 0:
-                    logger.debug("GPU Manager: 完成 %d 张图片 OCR", count)
+                    logger.info("GPU Manager: 完成 %d 张图片 OCR", count)
         except Exception as exc:
             logger.error("GPU Manager 子进程异常: %s", exc, exc_info=True)
         finally:

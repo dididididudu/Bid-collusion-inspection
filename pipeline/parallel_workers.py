@@ -289,6 +289,7 @@ def analyze_pair_worker(args: tuple) -> dict:
     """Phase 3 worker: 分析一个候选文档对"""
     doc_a_id, doc_b_id, config_dict, db_dir = args[:4]
     shared_matcher = args[4] if len(args) > 4 else None
+    all_para_full = args[5] if len(args) > 5 else None
     pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
 
     from config import DetectionConfig
@@ -351,7 +352,13 @@ def analyze_pair_worker(args: tuple) -> dict:
                         "error": ""}
 
         t_match = time.time()
-        paragraph_matches = matcher.match(doc_a, doc_b, cache)
+        para_full_a = all_para_full.get(doc_a_id) if all_para_full else None
+        para_full_b = all_para_full.get(doc_b_id) if all_para_full else None
+        paragraph_matches = matcher.match(
+            doc_a, doc_b, cache,
+            para_full_a=para_full_a,
+            para_full_b=para_full_b,
+        )
         match_time = time.time() - t_match
 
         text_evidence = _build_text_evidence_basic(doc_a, doc_b, paragraph_matches, config)
