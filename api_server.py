@@ -34,6 +34,7 @@ import uuid
 import time
 import shutil
 import logging
+import logging.handlers
 import threading
 import multiprocessing
 from datetime import datetime
@@ -104,39 +105,56 @@ app = FastAPI(
 @app.on_event("startup")
 async def preload_models():
     """服务启动时预加载所有模型，避免首次请求卡住"""
+    print("=" * 60)
+    print("🔄 正在预加载模型（首次启动需要 20-60 秒）...")
+    print("=" * 60)
     logger.info("=" * 50)
     logger.info("正在预加载模型...")
 
+    print("\n[1/2] 加载 SBERT 语义模型...")
     logger.info("[1/2] 加载 SBERT 语义模型（优先本地缓存）...")
     try:
-        # 先试离线（模型已下载过则瞬间完成）
         from sentence_transformers import SentenceTransformer
+        print("  ⏳ 正在加载，请稍候...")
         _ = SentenceTransformer(
             'paraphrase-multilingual-MiniLM-L12-v2',
             device='cpu', cache_folder='./models',
             trust_remote_code=True, local_files_only=True,
         )
+        print("  ✅ SBERT 加载完成")
         logger.info("  SBERT 离线加载完成")
         _global_sbert_model = _
     except Exception as e:
+        print(f"  ⚠️  SBERT 本地加载失败: {e}")
+        print("  ℹ️  SBERT 将在首次请求时按需加载")
         logger.warning(f"  SBERT 本地加载失败（首次运行需要联网下载）: {e}")
         logger.info("  SBERT 将在 Phase 1.5 按需加载")
 
+    print("\n[2/2] 加载 OCR 引擎...")
     logger.info("[2/2] 加载 OCR 引擎...")
     try:
         from config import DetectionConfig
         from image_analysis.image_ocr import ImageOCREngine
         _cfg = DetectionConfig()
+        print(f"  ⏳ 正在初始化 {_cfg.OCR_ENGINE}，请稍候...")
         engine = ImageOCREngine(
             use_gpu=_cfg.USE_GPU,
             engine=_cfg.OCR_ENGINE,
             offline=_cfg.OCR_OFFLINE_MODE,
         )
         ok = engine.is_available
+        if ok:
+            print(f"  ✅ OCR ({_cfg.OCR_ENGINE}) 加载完成")
+        else:
+            print(f"  ⚠️  OCR ({_cfg.OCR_ENGINE}) 不可用")
         logger.info(f"  OCR ({_cfg.OCR_ENGINE}) {'加载完成' if ok else '不可用'}")
     except Exception as e:
+        print(f"  ⚠️  OCR 加载异常: {e}")
         logger.warning(f"  OCR 加载异常: {e}")
 
+    print("\n" + "=" * 60)
+    print("✅ 模型预加载完成，服务就绪！")
+    print("=" * 60 + "\n")
     logger.info("模型预加载完成，服务就绪")
     logger.info("=" * 50)
 
