@@ -12,10 +12,11 @@ transformers>=4.20.0
 PyMuPDF>=1.23.0
 datasketch>=1.6.0
 
-paddlepaddle>=3.0.0
-paddleocr>=3.0.0
-
-easyocr>=1.7.0
-
 rapidocr-onnxruntime>=1.2.0
+
+# Optional OCR fallbacks. Default runtime uses RapidOCR to avoid PaddleOCR memory pressure.
+# paddlepaddle>=3.0.0
+# paddleocr>=3.0.0
+# easyocr>=1.7.0
+
 python-dotenv>=1.0.0

@@ -42,14 +42,14 @@ class OCRResult:
 class ImageOCREngine:
     """OCR 引擎封装 — 部署友好
 
-    优先使用 PaddleOCR（中文识别效果好，仅文字识别，禁用检测）。
-    可选 EasyOCR（需额外安装，作为备选）。
+    默认使用 RapidOCR（ONNX Runtime，CPU 更轻更快）。
+    PaddleOCR / EasyOCR 作为备选引擎。
 
     部署用法::
 
         # 离线模式
         engine = ImageOCREngine(
-            engine="paddleocr",
+            engine="rapidocr",
             model_dir="/data/models/ocr",
             offline=True,
         )
@@ -68,14 +68,14 @@ class ImageOCREngine:
         self,
         use_gpu: bool = False,
         languages: List[str] = None,
-        engine: str = "paddleocr",
+        engine: str = "rapidocr",
         model_dir: Optional[str] = None,
         offline: bool = False,
         retry_count: int = 3,
     ):
         self.use_gpu = use_gpu
         self.languages = languages or ['ch_sim', 'en']
-        self._engine = engine  # "paddleocr" or "easyocr"
+        self._engine = engine  # "rapidocr", "paddleocr" or "easyocr"
         self._model_dir = model_dir
         self._offline = offline
         self._retry_count = max(0, retry_count)
@@ -91,7 +91,7 @@ class ImageOCREngine:
 
     @property
     def engine_type(self) -> Optional[str]:
-        """实际使用的引擎类型: 'paddleocr' / 'easyocr' / None"""
+        """实际使用的引擎类型: 'rapidocr' / 'paddleocr' / 'easyocr' / None"""
         return self._engine_type
 
     @property
@@ -286,12 +286,10 @@ class ImageOCREngine:
             if self._available:
                 self._init_time = time.time() - t0
                 return
-            logger.info("RapidOCR 不可用，回退到 PaddleOCR...")
-            self._init_paddleocr()
-            if not self._available:
-                self._cleanup_failed_modules()
-                logger.info("PaddleOCR 不可用，回退到 EasyOCR...")
-                self._init_easyocr()
+            logger.warning(
+                "RapidOCR 不可用，OCR 将禁用；如需使用 PaddleOCR/EasyOCR，"
+                "请显式设置 OCR_ENGINE=paddleocr 或 OCR_ENGINE=easyocr"
+            )
         elif self._engine == "paddleocr":
             self._init_paddleocr()
             if self._available:

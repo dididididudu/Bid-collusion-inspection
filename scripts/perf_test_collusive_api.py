@@ -54,11 +54,19 @@ def _post_item(api: str, batch_id: int, item_code: str, companies: list):
         "companies": companies,
     }
     started = time.perf_counter()
-    resp = requests.post(
-        f"{api.rstrip('/')}/api/v1/collusive-check/items/analyze",
-        json=payload,
-        timeout=3600,
-    )
+    try:
+        resp = requests.post(
+            f"{api.rstrip('/')}/api/v1/collusive-check/items/analyze",
+            json=payload,
+            timeout=3600,
+        )
+    except requests.exceptions.ConnectionError as exc:
+        raise SystemExit(
+            f"Cannot connect to API: {api}\n"
+            "Please start collusive_check_api.py first and confirm port 8001 is listening.\n"
+            "If the server terminal only shows 'Killed', it was likely terminated by OOM; "
+            "use RapidOCR and lower worker counts."
+        ) from exc
     elapsed = time.perf_counter() - started
     print(f"\n[{item_code}] status={resp.status_code} elapsed={elapsed:.2f}s")
     try:

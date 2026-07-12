@@ -424,7 +424,9 @@ def _build_pipeline_config(cache_dir: str, ckpt_dir: str, dimension: str = "all"
     )
     config.ENABLE_OCR = os.environ.get("COLLUSIVE_ENABLE_OCR", "1").lower() in ("1", "true", "yes")
     config.ENABLE_IMAGE_ANALYSIS = os.environ.get("COLLUSIVE_ENABLE_IMAGE_ANALYSIS", "1").lower() in ("1", "true", "yes")
-    config.OCR_ENGINE = "paddleocr"
+    env_ocr_engine = os.environ.get("OCR_ENGINE", config.OCR_ENGINE).lower()
+    if env_ocr_engine in ("rapidocr", "paddleocr", "easyocr"):
+        config.OCR_ENGINE = env_ocr_engine
     config.USE_GPU = os.environ.get("USE_GPU", str(config.USE_GPU)).lower() in ("1", "true", "yes")
     env_sbert_device = os.environ.get("SBERT_DEVICE", config.SBERT_DEVICE).lower()
     if env_sbert_device in ("cpu", "cuda", "mps", "auto"):

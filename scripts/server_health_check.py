@@ -334,7 +334,7 @@ class ServerTester:
                     ("DOC_AUTHOR_SIMILAR", "文档作者雷同"),
                     ("EDITOR_SIGNER_SIMILAR", "编辑经办人雷同"),
                     ("FILE_CODE_SIMILAR", "文件码雷同"),
-                    ("Business_BID_SIMILAR", "投标文件公司名称异常"),
+                    ("Business_BID_SIMILAR", "商务标雷同"),
                     ("SAME_BID_CONTACT_SIMILAR", "同标段单位联系人雷同"),
                 ]
                 for item_code, item_name in test_items:

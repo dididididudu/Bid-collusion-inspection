@@ -116,7 +116,7 @@ class DetectionConfig:
     # ── OCR ──
     ENABLE_OCR: bool = False
     ENABLE_IMAGE_ANALYSIS: bool = True
-    OCR_ENGINE: str = "paddleocr"      # PaddleOCR 中文识别快，CPU 友好
+    OCR_ENGINE: str = "rapidocr"       # RapidOCR(ONNX Runtime) CPU 更轻更快，默认启用
     OCR_LANGUAGES: list = None
     OCR_SAMPLE_STEP: int = 1          # 必须=1，隔页采样会遗漏图片证据
     OCR_MIN_CONFIDENCE: float = 0.3

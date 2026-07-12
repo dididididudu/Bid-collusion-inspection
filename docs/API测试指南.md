@@ -38,10 +38,9 @@ curl -s http://118.178.240.30:8001/api/v1/collusive-check/item-codes | python3 -
         {"code": "FILE_CODE_SIMILAR", "name": "文件码雷同"},
         {"code": "EDITOR_SIGNER_SIMILAR", "name": "编辑经办人雷同"},
         {"code": "DOC_AUTHOR_SIMILAR", "name": "文档作者雷同"},
-        {"code": "Business_BID_SIMILAR", "name": "投标文件公司名称异常"},
         {"code": "SAME_BID_CONTACT_SIMILAR", "name": "同标段单位联系人雷同"},
         {"code": "TECH_BID_SIMILAR", "name": "技术标雷同"},
-        {"code": "COM_BID_SIMILAR", "name": "商务标雷同"}
+        {"code": "Business_BID_SIMILAR", "name": "商务标雷同"}
     ]
 }
 ```
@@ -228,7 +227,7 @@ curl -s -X POST http://118.178.240.30:8001/api/v1/collusive-check/items/analyze 
   -d '{
     "batchId": 200,
     "projectId": 10001,
-    "itemCode": "COM_BID_SIMILAR",
+    "itemCode": "Business_BID_SIMILAR",
     "companies": [
       {"companyRecordId": 601, "registrationCompanyId": 1, "sectionId": 1,
        "bidderName": "公司A", "bidFileUrl": "http://placeholder/a.pdf"},
@@ -287,7 +286,7 @@ curl -s -X POST http://118.178.240.30:8001/api/v1/collusive-check/items/analyze 
 
 缓存 key 格式：
 - `TECH_BID_SIMILAR` → `{batchId}_technical`
-- `COM_BID_SIMILAR` → `{batchId}_commercial`
+- `Business_BID_SIMILAR` → `{batchId}_commercial`
 
 ---
 
@@ -326,7 +325,8 @@ python collusive_check_api.py
 ### 7.2 管线运行到一半卡住
 
 查看日志输出，常见原因：
-- **PaddleOCR 未装** → `pip install paddleocr==2.10.0 paddlepaddle`
+- **RapidOCR 未装** → `pip install rapidocr-onnxruntime`
+- **服务端显示“已杀死”** → 通常是内存不足/OOM，优先使用默认 RapidOCR，并降低 `PHASE1_WORKERS`、`PDF_CHUNK_WORKERS`、`OCR_COLLECT_WORKERS`
 - **SBERT 模型首次下载慢** → 等待或离线部署
 - **内存不足** → 减少 `PHASE1_WORKERS` 和 `PHASE3_WORKERS`
 
