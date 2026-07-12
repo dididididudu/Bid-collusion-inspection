@@ -29,7 +29,10 @@ class ReportGenerator:
         self._generate_json_report(report, output_dir)
 
         # 2. 生成PDF可视化报告
-        self._generate_pdf_report(report, output_dir)
+        try:
+            self._generate_pdf_report(report, output_dir)
+        except Exception as e:
+            logger.warning(f"PDF报告生成失败，已保留JSON报告: {e}", exc_info=True)
 
         logger.info(f"报告已生成到: {output_dir}")
 

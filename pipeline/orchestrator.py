@@ -805,13 +805,18 @@ class BidDetectionOrchestrator:
                 if dimension in ("technical", "commercial"):
                     para_full = self.cache.load_all_paragraphs_full(doc_feat.doc_id)
                     pages = getattr(doc_feat, 'page_classifications', {}) or {}
-                    paragraphs = []
+                    paragraphs = {}
                     for idx, info in sorted(para_full.items()):
                         page_num = info.get('page_num', -1)
                         if pages.get(page_num, 'unknown') == dimension:
-                            paragraphs.append(info.get('text', ''))
+                            paragraphs[idx] = info.get('text', '')
                 else:
-                    paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
+                    paragraphs = {
+                        idx: text
+                        for idx, text in enumerate(
+                            self.cache.load_all_paragraphs_text(doc_feat.doc_id)
+                        )
+                    }
 
                 if not paragraphs:
                     continue
@@ -819,7 +824,7 @@ class BidDetectionOrchestrator:
                 # 检查已有嵌入
                 existing = self.cache.load_all_paragraph_embeddings(doc_feat.doc_id)
                 pending = {}
-                for para_idx, text in enumerate(paragraphs):
+                for para_idx, text in paragraphs.items():
                     total_paragraphs += 1
                     if para_idx in existing:
                         cached_by_doc.setdefault(doc_feat.doc_id, {})[para_idx] = existing[para_idx]
@@ -839,6 +844,23 @@ class BidDetectionOrchestrator:
                         f"({cached_count/total_paragraphs*100:.1f}%)")
 
         if not pending_by_doc:
+            if total_paragraphs == 0:
+                if dimension in ("technical", "commercial"):
+                    logger.warning(
+                        f"Phase 1.5: {dimension} 维度过滤后没有可编码段落，"
+                        "请检查 TOC/页码分类或文本抽取结果"
+                    )
+                else:
+                    logger.warning("Phase 1.5: 没有可编码段落，请检查文本抽取结果")
+                state.phase = 3
+                self.checkpoint.save(state)
+                embed_time = (datetime.now() - embed_start).total_seconds()
+                self._timings['phase15_embed'] = embed_time
+                logger.info(
+                    f"Phase 1.5 完成: 0 个段落 (无可编码文本), 耗时 {embed_time:.2f}s"
+                )
+                return
+
             logger.info("Phase 1.5: 所有段落嵌入已缓存，跳过编码")
             # 仍需确保文档级嵌入存在
             self._ensure_document_embeddings(cached_by_doc)

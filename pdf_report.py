@@ -7,6 +7,7 @@ from reportlab.lib.colors import HexColor, white
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
@@ -39,6 +40,18 @@ def _reg():
         p = os.path.join(_FONT_DIR, fn)
         try: pdfmetrics.registerFont(TTFont(name, p))
         except: pass
+    # Linux 服务器通常没有 Windows 字体。使用 ReportLab 内置 CID 中文字体兜底，
+    # 并给旧样式名做别名，避免 PDF 报告阶段影响 API 检测结果。
+    try:
+        pdfmetrics.getFont('Hei')
+        pdfmetrics.getFont('Hei-Bd')
+        pdfmetrics.getFont('Song')
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+        base_font = pdfmetrics.getFont('STSong-Light')
+        pdfmetrics._fonts.setdefault('Hei', base_font)
+        pdfmetrics._fonts.setdefault('Hei-Bd', base_font)
+        pdfmetrics._fonts.setdefault('Song', base_font)
     from reportlab.lib.fonts import addMapping
     addMapping('Hei',0,0,'Hei'); addMapping('Hei',1,0,'Hei-Bd')
     _FONTS_OK = True
