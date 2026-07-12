@@ -40,6 +40,8 @@ class ParagraphMatcher:
         cache: DocumentCache,
         para_full_a: Dict[int, dict] = None,
         para_full_b: Dict[int, dict] = None,
+        para_embeddings_a: Dict[int, np.ndarray] = None,
+        para_embeddings_b: Dict[int, np.ndarray] = None,
     ) -> List[Dict]:
         """Execute three-stage paragraph matching
 
@@ -55,8 +57,16 @@ class ParagraphMatcher:
         if para_full_b is None:
             para_full_b = cache.load_all_paragraphs_full(doc_b.doc_id)
 
-        minhashes_a = {k: v['minhash'] for k, v in para_full_a.items() if v['minhash']}
-        minhashes_b = {k: v['minhash'] for k, v in para_full_b.items() if v['minhash']}
+        minhashes_a = {
+            k: (v.get('minhash_array') if v.get('minhash_array') is not None else v.get('minhash', ''))
+            for k, v in para_full_a.items()
+            if v.get('minhash_array') is not None or v.get('minhash')
+        }
+        minhashes_b = {
+            k: (v.get('minhash_array') if v.get('minhash_array') is not None else v.get('minhash', ''))
+            for k, v in para_full_b.items()
+            if v.get('minhash_array') is not None or v.get('minhash')
+        }
 
         if not minhashes_a or not minhashes_b:
             logger.warning(
@@ -111,7 +121,13 @@ class ParagraphMatcher:
         # 初始化 valid_candidates，确保所有分支中该变量都有定义
         valid_candidates = []
 
-        if self.semantic_matcher.is_available:
+        cache_sbert_available = (
+            self.config.ENABLE_EMBEDDING_CACHE
+            and hasattr(self.semantic_matcher, 'score_pairs_from_cache')
+        )
+        realtime_sbert_available = False if cache_sbert_available else self.semantic_matcher.is_available
+
+        if cache_sbert_available or realtime_sbert_available:
             # 从 para_full 直接读取文本和预分词（已在 match 开头一次查询加载）
             para_texts_a = {}
             para_texts_b = {}
@@ -151,7 +167,9 @@ class ParagraphMatcher:
 
                     text_a = para_texts_a.get(i, '')
                     text_b = para_texts_b.get(j, '')
-                    seq_ratio = SequenceMatcher(None, text_a, text_b).ratio() if text_a and text_b else 0.0
+                    seq_ratio = self._fast_sequence_ratio(
+                        text_a, text_b, word_jaccard, minhash_sim
+                    )
 
                     if seq_ratio > 0.85:
                         exact_matches.append({
@@ -171,6 +189,9 @@ class ParagraphMatcher:
                         })
                     elif seq_ratio >= 0.4:
                         semantic_candidates.append((i, j, seq_ratio))
+                    elif minhash_sim >= 0.25:
+                        # 召回补充：词级重合较高但字符级低（同义改写），送入语义验证
+                        semantic_candidates.append((i, j, seq_ratio))
 
                 logger.info(
                     f"Stage 2a (Jaccard): {len(exact_matches)} exact matches, "
@@ -181,21 +202,63 @@ class ParagraphMatcher:
                 sbert_results = []
                 if semantic_candidates:
                     # 检查是否有预计算嵌入缓存（Phase 1.5 已运行）
-                    if (self.config.ENABLE_EMBEDDING_CACHE
-                            and hasattr(self.semantic_matcher, 'score_pairs_from_cache')):
+                    if cache_sbert_available:
                         sbert_results = self.semantic_matcher.score_pairs_from_cache(
                             semantic_candidates, para_texts_a, para_texts_b, cache,
                             doc_a_id=doc_a.doc_id, doc_b_id=doc_b.doc_id,
+                            preloaded_embeddings_a=para_embeddings_a,
+                            preloaded_embeddings_b=para_embeddings_b,
                         )
-                    else:
+                        logger.debug(f"score_pairs_from_cache: {len(semantic_candidates)} candidates -> {len(sbert_results)} results")
+                    elif realtime_sbert_available:
                         # 回退：实时 SBERT 编码
                         sbert_results = self.semantic_matcher.score_pairs(
                             semantic_candidates, para_texts_a, para_texts_b
                         )
+                        logger.debug(f"score_pairs: {len(semantic_candidates)} candidates -> {len(sbert_results)} results")
 
                 # Merge results: exact matches first
                 stage2_results = exact_matches + sbert_results
+
+                # 内容词重叠后过滤：移除 SBERT 相似但内容词不重叠的模板匹配
+                # (如"承诺方名称：A公司（盖章）" vs "投标人名称：B公司（公章）")
+                def _content_tokens(text):
+                    toks = set(w for w in jieba.cut(text) if len(w) >= 2)
+                    return toks
+                filtered = []
+                post_filter_removed = 0
+                for r in stage2_results:
+                    if r.get('detection_method') == 'SBERT' and r['similarity'] < 0.90:
+                        toks_a = _content_tokens(r.get('paragraph_a', ''))
+                        toks_b = _content_tokens(r.get('paragraph_b', ''))
+                        if toks_a and toks_b:
+                            overlap = len(toks_a & toks_b) / len(toks_a | toks_b)
+                            if overlap < 0.20:
+                                post_filter_removed += 1
+                                continue
+                    filtered.append(r)
+                if post_filter_removed > 0:
+                    logger.info(f"Post-filter removed {post_filter_removed} SBERT matches (content word overlap < 0.20)")
+                stage2_results = filtered
                 stage2_results.sort(key=lambda x: x['similarity'], reverse=True)
+
+                # 文本去重：相同文本对（如签名块在多页重复出现）只保留相似度最高的一条
+                seen_text_pairs = set()
+                deduped = []
+                dedup_removed = 0
+                for r in stage2_results:
+                    text_key = (
+                        r.get('paragraph_a', '')[:200],
+                        r.get('paragraph_b', '')[:200],
+                    )
+                    if text_key in seen_text_pairs:
+                        dedup_removed += 1
+                        continue
+                    seen_text_pairs.add(text_key)
+                    deduped.append(r)
+                if dedup_removed > 0:
+                    logger.info(f"Dedup removed {dedup_removed} duplicate matches (same text pair)")
+                stage2_results = deduped
 
             else:
                 stage2_results = []
@@ -252,6 +315,30 @@ class ParagraphMatcher:
                     f"matches have high template language ratio"
                 )
 
+            # 衰减后重新阈值过滤：模板语导致相似度衰减后低于阈值的匹配应移除
+            # （如"投标人名称：A公司（公章）" 原始 sim=0.90 通过阈值，衰减后 0.84 应被过滤）
+            post_decay_filtered = []
+            post_decay_removed = 0
+            for result in stage2_results:
+                text_a = result.get('paragraph_a', '')
+                text_b = result.get('paragraph_b', '')
+                avg_len = (len(text_a) + len(text_b)) / 2
+                if avg_len < self.config.SBERT_SHORT_PARAGRAPH_LEN:
+                    threshold = self.config.SBERT_SHORT_PARAGRAPH_THRESHOLD
+                else:
+                    threshold = self.config.SBERT_BASE_THRESHOLD
+                threshold = max(0.75, min(0.90, threshold))
+                if result['similarity'] < threshold:
+                    post_decay_removed += 1
+                    continue
+                post_decay_filtered.append(result)
+            if post_decay_removed > 0:
+                logger.info(
+                    f"Post-decay threshold filter: removed {post_decay_removed} matches "
+                    f"(similarity fell below threshold after boilerplate decay)"
+                )
+            stage2_results = post_decay_filtered
+
         # Sort by similarity descending
         stage2_results.sort(key=lambda x: x['similarity'], reverse=True)
 
@@ -304,6 +391,30 @@ class ParagraphMatcher:
         if clone_count > 0:
             logger.info(f"连续克隆块检测: {clone_count} 个段落属于连续克隆块")
 
+    def _fast_sequence_ratio(
+        self, text_a: str, text_b: str, word_jaccard: float, minhash_sim: float
+    ) -> float:
+        """对明显不相似或过长候选短路，避免 difflib 吃满 CPU。"""
+        if not text_a or not text_b:
+            return 0.0
+        len_a, len_b = len(text_a), len(text_b)
+        short_len, long_len = min(len_a, len_b), max(len_a, len_b)
+        if long_len == 0:
+            return 0.0
+        length_ratio = short_len / long_len
+        min_ratio = getattr(self.config, 'SEQUENCE_MATCHER_LENGTH_RATIO', 0.55)
+        if length_ratio < min_ratio and word_jaccard < 0.20 and minhash_sim < 0.25:
+            return 0.0
+        max_chars = getattr(self.config, 'SEQUENCE_MATCHER_MAX_CHARS', 1200)
+        if long_len > max_chars and word_jaccard < 0.35 and minhash_sim < 0.35:
+            return min(word_jaccard, minhash_sim)
+        if long_len > max_chars:
+            head = max_chars // 2
+            tail = max_chars - head
+            text_a = text_a[:head] + text_a[-tail:]
+            text_b = text_b[:head] + text_b[-tail:]
+        return SequenceMatcher(None, text_a, text_b).ratio()
+
     def _stage1_vectorized_minhash(
         self,
         minhashes_a: Dict[int, str],
@@ -319,13 +430,17 @@ class ParagraphMatcher:
         if not indices_a or not indices_b:
             return []
 
-        # 确保所有 minhash 值是字符串（数据库可能返回非字符串类型）
+        # 新库直接用 minhash_blob 反序列化出的 ndarray，旧库回退字符串解析。
         for k, v in list(minhashes_a.items()):
+            if isinstance(v, np.ndarray):
+                continue
             if not isinstance(v, str):
                 minhashes_a[k] = str(v)
             elif not v:
                 del minhashes_a[k]
         for k, v in list(minhashes_b.items()):
+            if isinstance(v, np.ndarray):
+                continue
             if not isinstance(v, str):
                 minhashes_b[k] = str(v)
             elif not v:
@@ -337,13 +452,19 @@ class ParagraphMatcher:
             return []
 
         first_hash = minhashes_a[indices_a[0]]
-        if not first_hash:
+        if first_hash is None or (isinstance(first_hash, str) and not first_hash):
             return []
-        dim = len(first_hash.split(','))
+        dim = len(first_hash) if isinstance(first_hash, np.ndarray) else len(first_hash.split(','))
 
         def build_matrix(indices, minhash_dict):
             """向量化 MinHash 解析 — np.fromstring 替代 Python 逐值循环"""
-            hashes = [minhash_dict[i] for i in indices if minhash_dict.get(i, '')]
+            values_for_indices = [minhash_dict[i] for i in indices if i in minhash_dict]
+            if values_for_indices and isinstance(values_for_indices[0], np.ndarray):
+                try:
+                    return np.stack(values_for_indices).astype(np.int64, copy=False)
+                except Exception as e:
+                    logger.debug(f"MinHash BLOB 堆叠失败, 回退字符串解析: {e}")
+            hashes = [v for v in values_for_indices if isinstance(v, str) and v]
             if not hashes:
                 return np.zeros((len(indices), dim), dtype=np.int64)
             try:

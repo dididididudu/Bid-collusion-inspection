@@ -149,6 +149,7 @@ class EmbeddingEngine:
             batch_size=batch_size,
             show_progress_bar=False,
             convert_to_numpy=True,
+            normalize_embeddings=getattr(self.config, 'NORMALIZE_EMBEDDINGS', True),
         )
 
         # 持久化到 SQLite

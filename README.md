@@ -39,10 +39,10 @@ pip install -r requirements.txt
 ### 2. 启动 API 服务
 
 ```bash
-python api_server.py
+python collusive_check_api.py
 ```
 
-服务默认监听 `http://0.0.0.0:8000`，API 文档自动生成在 `http://localhost:8000/docs`。
+服务默认监听 `http://0.0.0.0:8001`，API 文档自动生成在 `http://localhost:8001/docs`。
 
 ### 3. 提交检测任务
 
@@ -163,7 +163,7 @@ python main.py --diagnose
 
 ```bash
 set TRANSFORMERS_OFFLINE=1
-python api_server.py
+python collusive_check_api.py
 ```
 
 ## 系统要求

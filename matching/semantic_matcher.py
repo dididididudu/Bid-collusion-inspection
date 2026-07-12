@@ -190,6 +190,7 @@ class SemanticMatcher:
                 batch_size=batch_size,
                 show_progress_bar=False,
                 convert_to_numpy=True,
+                normalize_embeddings=getattr(self.config, 'NORMALIZE_EMBEDDINGS', True),
             )
         else:
             # ONNX 路径
@@ -267,14 +268,14 @@ class SemanticMatcher:
         for i, j, _ in candidates:
             if i not in a_global_map and i in para_texts_a:
                 text = para_texts_a[i].strip()
-                if len(text) >= 10:
+                if len(text) >= 15:
                     if text not in text_to_global_idx:
                         text_to_global_idx[text] = len(global_texts)
                         global_texts.append(text)
                     a_global_map[i] = text_to_global_idx[text]
             if j not in b_global_map and j in para_texts_b:
                 text = para_texts_b[j].strip()
-                if len(text) >= 10:
+                if len(text) >= 15:
                     if text not in text_to_global_idx:
                         text_to_global_idx[text] = len(global_texts)
                         global_texts.append(text)
@@ -313,14 +314,9 @@ class SemanticMatcher:
         sims = np.sum(embs_a_norm * embs_b_norm, axis=1)  # (m,)
 
         # === 阈值过滤并构建结果 ===
-        # 自适应阈值
-        n_candidates = len(candidates)
-        if n_candidates > 300:
-            base_threshold_adj = 0.03
-        elif n_candidates < 30:
-            base_threshold_adj = -0.03
-        else:
-            base_threshold_adj = 0.0
+        # 自适应阈值（已禁用：小候选集时 -0.03 调整会导致短段落阈值从 0.90 降至 0.87，
+        # 使模板化短句如"承诺方名称：A公司（盖章）" vs "投标人名称：B公司（公章）"误判为相似）
+        base_threshold_adj = 0.0
 
         results = []
         for k, (i, j, jaccard_sim) in enumerate(valid_candidates):
@@ -335,7 +331,7 @@ class SemanticMatcher:
             else:
                 threshold = self.config.SBERT_BASE_THRESHOLD
 
-            threshold = max(0.55, min(0.90, threshold + base_threshold_adj))
+            threshold = max(0.75, min(0.90, threshold + base_threshold_adj))
 
             if sim >= threshold:
                 results.append({
@@ -369,6 +365,8 @@ class SemanticMatcher:
         cache,
         doc_a_id: str = '',
         doc_b_id: str = '',
+        preloaded_embeddings_a: Dict[int, np.ndarray] = None,
+        preloaded_embeddings_b: Dict[int, np.ndarray] = None,
     ) -> List[Dict]:
         """从预计算嵌入缓存评分（Phase 3 查表模式，不调 SBERT 模型）
 
@@ -397,12 +395,26 @@ class SemanticMatcher:
                 all_b_indices.add(j)
 
         # 批量从 SQLite 加载预计算嵌入（关键：不调模型）
-        embs_a = cache.load_paragraph_embeddings(
-            doc_a_id, list(all_a_indices)
-        ) if all_a_indices and doc_a_id else {}
-        embs_b = cache.load_paragraph_embeddings(
-            doc_b_id, list(all_b_indices)
-        ) if all_b_indices and doc_b_id else {}
+        if preloaded_embeddings_a is not None:
+            embs_a = {
+                idx: preloaded_embeddings_a[idx]
+                for idx in all_a_indices
+                if idx in preloaded_embeddings_a
+            }
+        else:
+            embs_a = cache.load_paragraph_embeddings(
+                doc_a_id, list(all_a_indices)
+            ) if all_a_indices and doc_a_id else {}
+        if preloaded_embeddings_b is not None:
+            embs_b = {
+                idx: preloaded_embeddings_b[idx]
+                for idx in all_b_indices
+                if idx in preloaded_embeddings_b
+            }
+        else:
+            embs_b = cache.load_paragraph_embeddings(
+                doc_b_id, list(all_b_indices)
+            ) if all_b_indices and doc_b_id else {}
 
         # 构建对齐嵌入矩阵（向量化批量余弦相似度）
         valid_pairs = []
@@ -416,18 +428,16 @@ class SemanticMatcher:
 
         emb_a_mat = np.stack([p[3] for p in valid_pairs])
         emb_b_mat = np.stack([p[4] for p in valid_pairs])
-        na = np.linalg.norm(emb_a_mat, axis=1); na[na == 0] = 1.0
-        nb = np.linalg.norm(emb_b_mat, axis=1); nb[nb == 0] = 1.0
-        all_sims = np.sum(emb_a_mat * emb_b_mat, axis=1) / (na * nb)
-
-        # 自适应阈值
-        n_candidates = len(candidates)
-        if n_candidates > 300:
-            base_threshold_adj = 0.03
-        elif n_candidates < 30:
-            base_threshold_adj = -0.03
+        if getattr(self.config, 'NORMALIZE_EMBEDDINGS', True):
+            all_sims = np.sum(emb_a_mat * emb_b_mat, axis=1)
         else:
-            base_threshold_adj = 0.0
+            na = np.linalg.norm(emb_a_mat, axis=1); na[na == 0] = 1.0
+            nb = np.linalg.norm(emb_b_mat, axis=1); nb[nb == 0] = 1.0
+            all_sims = np.sum(emb_a_mat * emb_b_mat, axis=1) / (na * nb)
+
+        # 自适应阈值（已禁用：小候选集时 -0.03 调整会导致短段落阈值从 0.90 降至 0.87，
+        # 使模板化短句如"承诺方名称：A公司（盖章）" vs "投标人名称：B公司（公章）"误判为相似）
+        base_threshold_adj = 0.0
 
         results = []
         for idx, (i, j, jaccard_sim, _ea, _eb) in enumerate(valid_pairs):
@@ -443,7 +453,7 @@ class SemanticMatcher:
             else:
                 threshold = self.config.SBERT_BASE_THRESHOLD
 
-            threshold = max(0.55, min(0.90, threshold + base_threshold_adj))
+            threshold = max(0.75, min(0.90, threshold + base_threshold_adj))
 
             if sim >= threshold:
                 results.append({
@@ -462,7 +472,7 @@ class SemanticMatcher:
 
         results.sort(key=lambda x: x['similarity'], reverse=True)
         logger.debug(
-            f"缓存评分完成: {len(candidates)} 候选 → {len(results)} 匹配 "
+            f"score_pairs_from_cache: {len(valid_pairs)} valid_pairs -> {len(results)} results "
             f"(嵌入命中: A={len(embs_a)}, B={len(embs_b)})"
         )
         return results

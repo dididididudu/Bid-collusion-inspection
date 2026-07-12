@@ -193,6 +193,38 @@ class CandidatePairSelector:
             logger.warning("无文档嵌入缓存，跳过向量预筛")
             return candidate_pairs
 
+        if getattr(self.config, 'NORMALIZE_EMBEDDINGS', True):
+            doc_ids = list(doc_embeddings.keys())
+            doc_pos = {doc_id: idx for idx, doc_id in enumerate(doc_ids)}
+            emb_mat = np.stack([doc_embeddings[doc_id] for doc_id in doc_ids])
+            pairs = list(candidate_pairs.items())
+            valid_rows = []
+            missing = []
+            for pair_idx, ((doc_a_id, doc_b_id), _meta) in enumerate(pairs):
+                ia = doc_pos.get(doc_a_id)
+                ib = doc_pos.get(doc_b_id)
+                if ia is None or ib is None:
+                    missing.append(pair_idx)
+                else:
+                    valid_rows.append((pair_idx, ia, ib))
+
+            filtered = {}
+            if valid_rows:
+                idx_a = [r[1] for r in valid_rows]
+                idx_b = [r[2] for r in valid_rows]
+                sims = np.sum(emb_mat[idx_a] * emb_mat[idx_b], axis=1)
+                for row_idx, sim in zip([r[0] for r in valid_rows], sims):
+                    (doc_a_id, doc_b_id), (method, old_sim) = pairs[row_idx]
+                    cos_sim = float(sim)
+                    if cos_sim >= threshold:
+                        filtered[(doc_a_id, doc_b_id)] = (
+                            method, max(float(old_sim), cos_sim)
+                        )
+            for row_idx in missing:
+                pair, meta = pairs[row_idx]
+                filtered[pair] = meta
+            return filtered
+
         filtered = {}
         for (doc_a_id, doc_b_id), (method, sim) in candidate_pairs.items():
             emb_a = doc_embeddings.get(doc_a_id)

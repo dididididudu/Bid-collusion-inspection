@@ -39,6 +39,10 @@ class CheckpointManager:
 
     def load_or_new(self) -> CheckpointState:
         """加载检查点，如果不存在或配置变更则创建新状态"""
+        if not getattr(self.config, 'ENABLE_CHECKPOINT', True):
+            logger.info("断点续传已禁用，创建新状态")
+            return self._new_state()
+
         if os.path.exists(self.state_path):
             try:
                 with open(self.state_path, 'r', encoding='utf-8') as f:
@@ -81,6 +85,8 @@ class CheckpointManager:
 
     def save(self, state: CheckpointState):
         """保存管道状态"""
+        if not getattr(self.config, 'ENABLE_CHECKPOINT', True):
+            return
         state.config_hash = self._hash_config()
 
         data = {

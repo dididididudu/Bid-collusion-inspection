@@ -77,8 +77,12 @@ def _build_image_evidence(doc_a, doc_b, cache, config=None, semantic_matcher=Non
     evidence.common_image_count = len(common_exact)
     evidence.common_image_hashes = common_exact
 
-    ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
-    ocr_b = cache.load_image_ocr_results(doc_b.doc_id)
+    if config and config.ENABLE_OCR:
+        ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
+        ocr_b = cache.load_image_ocr_results(doc_b.doc_id)
+    else:
+        ocr_a = []
+        ocr_b = []
     if ocr_a: evidence.ocr_results_a = ocr_a
     if ocr_b: evidence.ocr_results_b = ocr_b
 
@@ -201,15 +205,23 @@ def extract_single_worker(args: tuple) -> dict:
         )
 
         if start_page >= page_count and page_count > 0:
-            logger.info(f"[Worker] 已完全提取: {filename}")
-            try:
-                fp = extract_contacts_from_sqlite(doc_id, cache)
-                cache.store_contact_fingerprint(doc_id, fp.to_json())
-            except Exception:
-                pass
-            cache.conn.commit()
-            cache.close()
-            return {"doc_id": doc_id, "filename": filename, "success": True}
+            # 检查文档特征是否已存储（含 doc_minhash）
+            existing_doc = cache.load_document(doc_id)
+            if existing_doc and existing_doc.doc_minhash:
+                logger.info(f"[Worker] 已完全提取: {filename}")
+                try:
+                    fp = extract_contacts_from_sqlite(doc_id, cache)
+                    cache.store_contact_fingerprint(doc_id, fp.to_json())
+                except Exception:
+                    pass
+                cache.conn.commit()
+                cache.close()
+                return {"doc_id": doc_id, "filename": filename, "success": True}
+            else:
+                # chunks 已缓存但文档特征缺失（doc_minhash 为空），需重新提取
+                logger.warning(f"[Worker] {filename} 的 chunks 已缓存但特征缺失，重新提取")
+                cache.delete_document_chunks(doc_id)
+                start_page = 0
 
         chunks = []
         _begin_immediate_with_retry(cache.conn, max_retries=10)
@@ -290,6 +302,7 @@ def analyze_pair_worker(args: tuple) -> dict:
     doc_a_id, doc_b_id, config_dict, db_dir = args[:4]
     shared_matcher = args[4] if len(args) > 4 else None
     all_para_full = args[5] if len(args) > 5 else None
+    all_para_embeddings = args[6] if len(args) > 6 else None
     pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
 
     from config import DetectionConfig
@@ -319,8 +332,10 @@ def analyze_pair_worker(args: tuple) -> dict:
         if not doc_a.doc_minhash or not doc_b.doc_minhash:
             if doc_a.image_hashes or doc_b.image_hashes:
                 logger.info(f"[Analyze] 无文本-仅图片: {fname_a} vs {fname_b}")
-                image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
-                                                        semantic_matcher=getattr(matcher, 'semantic_matcher', None))
+                image_evidence = ImageEvidence()
+                if getattr(config, 'ENABLE_IMAGE_ANALYSIS', True):
+                    image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
+                                                            semantic_matcher=getattr(matcher, 'semantic_matcher', None))
                 metadata_evidence = build_metadata_evidence(doc_a, doc_b)
                 evidence = EvidenceChain(
                     text_evidence=TextEvidence(),
@@ -354,17 +369,23 @@ def analyze_pair_worker(args: tuple) -> dict:
         t_match = time.time()
         para_full_a = all_para_full.get(doc_a_id) if all_para_full else None
         para_full_b = all_para_full.get(doc_b_id) if all_para_full else None
+        para_emb_a = all_para_embeddings.get(doc_a_id) if all_para_embeddings else None
+        para_emb_b = all_para_embeddings.get(doc_b_id) if all_para_embeddings else None
         paragraph_matches = matcher.match(
             doc_a, doc_b, cache,
             para_full_a=para_full_a,
             para_full_b=para_full_b,
+            para_embeddings_a=para_emb_a,
+            para_embeddings_b=para_emb_b,
         )
         match_time = time.time() - t_match
 
         text_evidence = _build_text_evidence_basic(doc_a, doc_b, paragraph_matches, config)
         metadata_evidence = build_metadata_evidence(doc_a, doc_b)
-        image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
-                                                semantic_matcher=getattr(matcher, 'semantic_matcher', None))
+        image_evidence = ImageEvidence()
+        if getattr(config, 'ENABLE_IMAGE_ANALYSIS', True):
+            image_evidence = _build_image_evidence(doc_a, doc_b, cache, config=config,
+                                                    semantic_matcher=getattr(matcher, 'semantic_matcher', None))
 
         evidence = EvidenceChain(
             text_evidence=text_evidence,
@@ -388,11 +409,12 @@ def analyze_pair_worker(args: tuple) -> dict:
         clone_block_count = len(text_evidence.continuous_clone_blocks) if hasattr(text_evidence, 'continuous_clone_blocks') else 0
 
         total_time = time.time() - t_start
-        logger.info(f"[Analyze] {fname_a} vs {fname_b} — "
-                    f"匹配 {len(paragraph_matches)} 段, "
-                    f"相似度 {text_evidence.local_similarity:.3f}, "
-                    f"克隆块 {clone_block_count}, "
-                    f"匹配耗时 {match_time:.2f}s, 总计 {total_time:.2f}s")
+        log_fn = logger.debug if getattr(config, 'REDUCE_PAIR_LOG_IO', True) else logger.info
+        log_fn(f"[Analyze] {fname_a} vs {fname_b} — "
+               f"匹配 {len(paragraph_matches)} 段, "
+               f"相似度 {text_evidence.local_similarity:.3f}, "
+               f"克隆块 {clone_block_count}, "
+               f"匹配耗时 {match_time:.2f}s, 总计 {total_time:.2f}s")
         return {"pair_id": pair_id, "success": True,
                 "match_count": len(paragraph_matches),
                 "clone_block_count": clone_block_count,

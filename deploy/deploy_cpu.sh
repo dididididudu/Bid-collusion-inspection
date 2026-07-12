@@ -94,7 +94,9 @@ Environment="PATH=$PROJECT_DIR/.venv/bin"
 Environment="CUDA_VISIBLE_DEVICES="
 Environment="BID_HOST=0.0.0.0"
 Environment="BID_PORT=$PORT"
-ExecStart=$PROJECT_DIR/.venv/bin/python api_server.py
+Environment="COLLUSIVE_HOST=0.0.0.0"
+Environment="COLLUSIVE_PORT=$PORT"
+ExecStart=$PROJECT_DIR/.venv/bin/python collusive_check_api.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

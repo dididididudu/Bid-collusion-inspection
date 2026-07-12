@@ -124,9 +124,13 @@ def build_image_evidence(
             matched_images['doc_b'] = imgs_b
     evidence.matched_image_paths = matched_images
 
-    # 加载 OCR 结果
-    ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
-    ocr_b = cache.load_image_ocr_results(doc_b.doc_id)
+    # 加载 OCR 结果（仅在 OCR 启用时）
+    if config and config.ENABLE_OCR:
+        ocr_a = cache.load_image_ocr_results(doc_a.doc_id)
+        ocr_b = cache.load_image_ocr_results(doc_b.doc_id)
+    else:
+        ocr_a = []
+        ocr_b = []
 
     if ocr_a:
         evidence.ocr_results_a = ocr_a
@@ -302,28 +306,25 @@ def build_text_evidence(
     weighted_sum = sum(s * s for s in similarities)
     weighted_mean = weighted_sum / sum(similarities) if sum(similarities) > 0 else 0.0
 
-    quality_score = 0.50 * max_sim + 0.35 * top_k_sim + 0.15 * weighted_mean
+    # 质量分：使用 config 权重（40% max + 30% top_k + 20% mean）
+    quality_score = (
+        config.SCORE_WEIGHT_MAX * max_sim
+        + config.SCORE_WEIGHT_TOP_K * top_k_sim
+        + config.SCORE_WEIGHT_MEAN * weighted_mean
+    )
 
-    # 覆盖率分数
+    # 覆盖率衰减因子：匹配段落数 / 文档总段落数（下界估算=最大索引+1）
     covered_a = len(set(m['paragraph_a_index'] for m in paragraph_matches))
     covered_b = len(set(m['paragraph_b_index'] for m in paragraph_matches))
-    estimated_total = max(1, covered_a + covered_b)
-    coverage_ratio = (covered_a + covered_b) / (estimated_total * 2) if estimated_total > 0 else 0
-    coverage_score = 1.0 - math.exp(-4 * coverage_ratio) if coverage_ratio > 0 else 0.0
+    max_idx_a = max((m['paragraph_a_index'] for m in paragraph_matches), default=0) + 1
+    max_idx_b = max((m['paragraph_b_index'] for m in paragraph_matches), default=0) + 1
+    total_a = max(max_idx_a, covered_a, 1)
+    total_b = max(max_idx_b, covered_b, 1)
+    coverage_ratio = (covered_a / total_a + covered_b / total_b) / 2
+    coverage_decay = 1.0 - math.exp(-5 * coverage_ratio)
 
-    # 一致性分数
-    sorted_by_a = sorted(paragraph_matches, key=lambda x: x['paragraph_a_index'])
-    consecutive = sum(
-        1 for k in range(1, len(sorted_by_a))
-        if (sorted_by_a[k]['paragraph_a_index'] - sorted_by_a[k - 1]['paragraph_a_index'] == 1 and
-            sorted_by_a[k]['paragraph_b_index'] - sorted_by_a[k - 1]['paragraph_b_index'] == 1)
-    )
-    consistency_score = min(1.0, 0.5 + consecutive * 0.01) if consecutive >= 3 else 0.5
-
-    evidence.local_similarity = min(
-        1.0,
-        0.60 * quality_score + 0.25 * coverage_score + 0.15 * consistency_score
-    )
+    # 最终相似度 = 质量分 × 覆盖率衰减因子
+    evidence.local_similarity = min(1.0, quality_score * coverage_decay)
 
     # 检测连续克隆块
     clone_blocks = _detect_clone_blocks(paragraph_matches, config)

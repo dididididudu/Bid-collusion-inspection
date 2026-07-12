@@ -26,14 +26,14 @@ class DetectionConfig:
 
     # ── 文本匹配 ──
     TEXT_LOCAL_THRESHOLD: float = 0.85
-    SBERT_BASE_THRESHOLD: float = 0.75
-    SBERT_SHORT_PARAGRAPH_THRESHOLD: float = 0.80
+    SBERT_BASE_THRESHOLD: float = 0.80
+    SBERT_SHORT_PARAGRAPH_THRESHOLD: float = 0.90
     SBERT_SHORT_PARAGRAPH_LEN: int = 100
 
     # ── 评分 ──
-    SCORE_WEIGHT_MAX: float = 0.35
+    SCORE_WEIGHT_MAX: float = 0.40
     SCORE_WEIGHT_TOP_K: float = 0.30
-    SCORE_WEIGHT_MEAN: float = 0.25
+    SCORE_WEIGHT_MEAN: float = 0.20
     SCORE_TOP_K: int = 8
 
     # ── 克隆块 ──
@@ -77,11 +77,13 @@ class DetectionConfig:
     CHECKPOINT_DIR: str = "./checkpoints"
     CHECKPOINT_INTERVAL: int = 50
     CACHE_DIR: str = "./cache"
+    TEXT_EMBEDDING_CACHE_DIR: Optional[str] = None
     DISABLE_CACHE: bool = False
 
     # ── 并行 ──
     PHASE1_WORKERS: int = 2         # CPU 场景不宜过高，文本提取 IO 密集 2 即可
     PHASE3_WORKERS: int = 2         # CPU 场景不超过核心数/2
+    PHASE3_USE_PROCESS_POOL: bool = True  # Phase 3 CPU 密集，默认多进程
     DB_BUSY_TIMEOUT: int = 120000
 
     # ── GPU / SBERT ──
@@ -91,6 +93,13 @@ class DetectionConfig:
     USE_ONNX: bool = False
     ONNX_MODEL_PATH: Optional[str] = None
     ENABLE_EMBEDDING_CACHE: bool = True
+    ENABLE_TEXT_EMBEDDING_CACHE: bool = True  # 按文本 hash 跨批次复用 SBERT 向量
+    NORMALIZE_EMBEDDINGS: bool = True         # 编码时归一化，后续余弦直接点积
+    PHASE3_PRELOAD_EMBEDDINGS: bool = True    # Phase 3 预加载段落向量，减少 SQLite 查询
+    PERF_LOG_ENABLED: bool = True             # 阶段耗时埋点
+    REDUCE_PAIR_LOG_IO: bool = True           # 降低 pair 级 info 日志 IO
+    SEQUENCE_MATCHER_MAX_CHARS: int = 1200    # 长段落先短路，避免 difflib 成为 CPU 瓶颈
+    SEQUENCE_MATCHER_LENGTH_RATIO: float = 0.55
     EMBEDDING_DIM: int = 384
     EMBED_WORKERS: int = 1           # CPU 上单进程即可
     GPU_MANAGER_ENABLED: bool = False  # GPU Manager 开关（CPU服务器禁用）
@@ -99,15 +108,16 @@ class DetectionConfig:
 
     # ── 文档预筛 ──
     DOC_VECTOR_FILTER_ENABLED: bool = True
-    DOC_VECTOR_THRESHOLD: float = 0.15
+    DOC_VECTOR_THRESHOLD: float = 0.30
     METADATA_FILTER_ENABLED: bool = True
     TIME_BUCKET_FORMAT: str = "%Y-%m-%dT%H"
 
     # ── OCR ──
     ENABLE_OCR: bool = False
+    ENABLE_IMAGE_ANALYSIS: bool = True
     OCR_ENGINE: str = "paddleocr"      # PaddleOCR 中文识别快，CPU 友好
     OCR_LANGUAGES: list = None
-    OCR_SAMPLE_STEP: int = 2          # CPU 场景隔页采样，耗时减半
+    OCR_SAMPLE_STEP: int = 1          # 必须=1，隔页采样会遗漏图片证据
     OCR_MIN_CONFIDENCE: float = 0.3
     OCR_WORKERS: int = 1              # CPU 场景单进程 OCR，多进程争 CPU 反而慢
     OCR_MODEL_DIR: Optional[str] = None
@@ -222,6 +232,14 @@ class DetectionConfig:
         if env_phase3.isdigit():
             self.PHASE3_WORKERS = int(env_phase3)
             logger.info(f"PHASE3_WORKERS 从环境变量加载: {self.PHASE3_WORKERS}")
+
+        env_phase3_pool = os.environ.get('PHASE3_USE_PROCESS_POOL', '').lower()
+        if env_phase3_pool in ('true', '1', 'yes'):
+            self.PHASE3_USE_PROCESS_POOL = True
+            logger.info("PHASE3_USE_PROCESS_POOL 从环境变量加载: True")
+        elif env_phase3_pool in ('false', '0', 'no'):
+            self.PHASE3_USE_PROCESS_POOL = False
+            logger.info("PHASE3_USE_PROCESS_POOL 从环境变量加载: False")
         
         if self.PADDLEOCR_HOME is None:
             env_home = os.environ.get('PADDLEOCR_HOME', '')

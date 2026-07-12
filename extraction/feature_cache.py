@@ -9,6 +9,7 @@ SQLite 特征缓存 - 将所有大型文本数据从内存转移到持久化存�
 """
 
 import os
+import hashlib
 import zlib
 import json
 import sqlite3
@@ -31,7 +32,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 8  # v8: paragraphs 新增 page_num 列 + 全局 para_index
+    SCHEMA_VERSION = 9  # v9: minhash BLOB + text_hash 全局 embedding 缓存
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -45,8 +46,18 @@ class DocumentCache:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         _busy_ms = getattr(config, 'DB_BUSY_TIMEOUT', 30000)
         self._apply_pragmas(self.conn, _busy_ms)
+        self.text_cache_conn = self.conn
+        text_cache_dir = getattr(config, 'TEXT_EMBEDDING_CACHE_DIR', None) if config else None
+        if text_cache_dir:
+            os.makedirs(text_cache_dir, exist_ok=True)
+            self.text_cache_db_path = os.path.join(text_cache_dir, "text_embeddings.db")
+            self.text_cache_conn = sqlite3.connect(self.text_cache_db_path, check_same_thread=False)
+            self._apply_pragmas(self.text_cache_conn, _busy_ms)
 
         self._create_schema()
+        if self.text_cache_conn is not self.conn:
+            self._create_text_embedding_cache_schema(self.text_cache_conn.cursor())
+            self.text_cache_conn.commit()
         logger.debug(f"SQLite 缓存已初始化: {self.db_path} (WAL 模式)")
 
     @staticmethod
@@ -122,6 +133,9 @@ class DocumentCache:
             # v8 迁移：paragraphs 新增 page_num 列
             if current_version < 8:
                 self._migrate_v8(cursor)
+            # v9 迁移：MinHash 二进制列 + 全局文本嵌入缓存
+            if current_version < 9:
+                self._migrate_v9(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -242,6 +256,28 @@ class DocumentCache:
         except Exception:
             pass
 
+    def _migrate_v9(self, cursor):
+        """v9 迁移：MinHash BLOB + text_hash embedding cache"""
+        try:
+            cursor.execute(
+                "ALTER TABLE paragraphs ADD COLUMN minhash_blob BLOB"
+            )
+        except Exception:
+            pass
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS text_embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                model_name TEXT DEFAULT '',
+                embedding BLOB NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_text_embedding_model "
+            "ON text_embedding_cache(model_name)"
+        )
+        logger.info("v9 模式迁移完成：MinHash BLOB + 文本嵌入缓存")
+
     def _create_tables(self, cursor):
         """创建所有表"""
         # 文档注册表
@@ -298,8 +334,10 @@ class DocumentCache:
                 page_num INTEGER DEFAULT -1,
                 text TEXT,
                 minhash TEXT DEFAULT '',
+                minhash_blob BLOB,
                 tokens TEXT DEFAULT '',
                 source TEXT DEFAULT 'text',
+                embedding BLOB,
                 FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
                 FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id),
                 UNIQUE(doc_id, para_index)
@@ -378,6 +416,28 @@ class DocumentCache:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraphs_chunk ON paragraphs(chunk_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_candidate_pairs_processed ON candidate_pairs(processed)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraph_matches_pair ON paragraph_matches(pair_id)")
+        self._create_text_embedding_cache_schema(cursor)
+
+    @staticmethod
+    def _create_text_embedding_cache_schema(cursor):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS text_embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                model_name TEXT DEFAULT '',
+                embedding BLOB NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_embedding_model ON text_embedding_cache(model_name)")
+
+    @staticmethod
+    def _minhash_to_blob(minhash: str) -> bytes:
+        if not minhash:
+            return b''
+        try:
+            return np.fromstring(minhash, sep=',', dtype=np.int64).tobytes()
+        except Exception:
+            return b''
 
     # ================================================================
     # 文档 CRUD
@@ -573,15 +633,16 @@ class DocumentCache:
                  chunk_result.doc_id, chunk_id,
                  para_offset + para_idx,
                  para_page_nums[para_idx] if para_idx < len(para_page_nums) else -1,
-                 para_text, para_hash, source,
+                 para_text, para_hash, self._minhash_to_blob(para_hash), source,
                  _json.dumps(para_tokens[para_idx] if para_idx < len(para_tokens) else [], ensure_ascii=False))
                 for para_idx, (para_text, para_hash) in enumerate(
                     zip(chunk_result.paragraphs, chunk_result.paragraph_hashes))
             ]
             _conn.executemany("""
                 INSERT OR REPLACE INTO paragraphs (
-                    para_id, doc_id, chunk_id, para_index, page_num, text, minhash, source, tokens
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    para_id, doc_id, chunk_id, para_index, page_num, text, minhash,
+                    minhash_blob, source, tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, para_rows)
 
             if _own_tx:
@@ -654,6 +715,13 @@ class DocumentCache:
             return json.loads(row[0])
         return []
 
+    def delete_document_chunks(self, doc_id: str) -> None:
+        """删除文档的所有 chunks 和 paragraphs（用于重新提取）"""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM paragraphs WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+        logger.info(f"已清除文档 {doc_id} 的缓存 chunks 和 paragraphs")
+
     def load_paragraph_text(self, doc_id: str, para_index: int) -> Optional[str]:
         """加载单个段落的文本"""
         cursor = self.conn.cursor()
@@ -684,12 +752,12 @@ class DocumentCache:
         import json as _json
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT para_index, minhash, text, tokens, source, page_num "
+            "SELECT para_index, minhash, minhash_blob, text, tokens, source, page_num "
             "FROM paragraphs WHERE doc_id = ? AND text IS NOT NULL AND text != '' "
             "ORDER BY para_index", (doc_id,))
         result = {}
         for row in cursor.fetchall():
-            idx, mh, text, tokens_raw, source, page_num = row
+            idx, mh, mh_blob, text, tokens_raw, source, page_num = row
             tokens = []
             if tokens_raw:
                 try: tokens = _json.loads(tokens_raw)
@@ -697,6 +765,7 @@ class DocumentCache:
             # 确保 minhash 为字符串（数据库列是 TEXT 但可能返回整数）
             mh_str = str(mh) if mh is not None else ''
             result[idx] = {'minhash': mh_str, 'text': text or '',
+                           'minhash_array': np.frombuffer(mh_blob, dtype=np.int64) if mh_blob else None,
                            'tokens': tokens, 'source': source or 'text',
                            'page_num': page_num if page_num is not None else -1}
         return result
@@ -814,6 +883,61 @@ class DocumentCache:
                 "WHERE doc_id = ? AND para_index = ?",
                 data
             )
+
+    def load_text_embedding_cache(
+        self, text_hashes: List[str], model_name: str = ''
+    ) -> Dict[str, 'np.ndarray']:
+        """按 text_hash 批量加载全局 SBERT embedding 缓存。"""
+        if not text_hashes:
+            return {}
+        result = {}
+        chunk_size = 900
+        cursor = self.text_cache_conn.cursor()
+        unique_hashes = list(dict.fromkeys(text_hashes))
+        for start in range(0, len(unique_hashes), chunk_size):
+            chunk = unique_hashes[start:start + chunk_size]
+            placeholders = ','.join('?' * len(chunk))
+            params = list(chunk)
+            model_clause = ''
+            if model_name:
+                model_clause = ' AND model_name = ?'
+                params.append(model_name)
+            cursor.execute(
+                f"SELECT text_hash, embedding FROM text_embedding_cache "
+                f"WHERE text_hash IN ({placeholders}){model_clause}",
+                params,
+            )
+            for text_hash, blob in cursor.fetchall():
+                if blob:
+                    result[text_hash] = np.frombuffer(blob, dtype=np.float32)
+        return result
+
+    def store_text_embedding_cache(
+        self, items: List[tuple], model_name: str = ''
+    ) -> None:
+        """批量存储全局文本 embedding 缓存。
+
+        Args:
+            items: [(text_hash, embedding_array), ...]
+        """
+        if not items:
+            return
+        rows = [
+            (text_hash, model_name, emb.astype(np.float32).tobytes())
+            for text_hash, emb in items
+        ]
+        conn = self.text_cache_conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT OR REPLACE INTO text_embedding_cache "
+                "(text_hash, model_name, embedding) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def load_paragraph_embeddings(
         self, doc_id: str, para_indices: List[int]
@@ -1428,6 +1552,8 @@ class DocumentCache:
 
     def close(self) -> None:
         """关闭数据库连接"""
+        if getattr(self, 'text_cache_conn', self.conn) is not self.conn:
+            self.text_cache_conn.close()
         self.conn.close()
         logger.debug("SQLite 缓存已关闭")
 

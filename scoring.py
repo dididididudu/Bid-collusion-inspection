@@ -1,5 +1,5 @@
 """
-模块 D：风险评级与聚类引擎（简化版 — 仅报告编排，不评分）
+模块 D：相似内容聚类与报告编排引擎
 """
 import logging
 from typing import List, Dict, Set, Optional
@@ -26,7 +26,7 @@ class RiskScoringEngine:
         pairwise_results: List[PairwiseResult],
         features: List[BidFeature]
     ) -> GlobalReport:
-        """生成全局检测报告（不评分，直接编排）"""
+        """生成全局检测报告（相似内容聚类与编排）"""
 
         # 1. 计数有证据的文档对
         suspicious_pairs = [r for r in pairwise_results if r.has_evidence()]
@@ -49,7 +49,7 @@ class RiskScoringEngine:
             total_pairs=len(features) * (len(features) - 1) // 2,
             candidate_pairs=len(pairwise_results),
             suspicious_pairs=len(suspicious_pairs),
-            high_risk_pairs=0,  # 不再区分高风险
+            high_risk_pairs=0,
             risk_clusters=risk_clusters,
             metadata_groups=metadata_groups,  # ★
             pairwise_results=pairwise_results,
@@ -62,11 +62,6 @@ class RiskScoringEngine:
             f"{len(metadata_groups)} 个元数据聚合组"
         )
         return report
-
-    def _score_pair(self, result: PairwiseResult,
-                     enabled_dims: dict = None) -> PairwiseResult:
-        """简化版：不计算风险评分/等级，直接返回原结果"""
-        return result
 
     def _cluster_risks(
         self,

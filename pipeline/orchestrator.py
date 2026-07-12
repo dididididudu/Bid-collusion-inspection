@@ -7,13 +7,14 @@
   Phase 1.5: EMBED - 全局 SBERT 嵌入编码（一次性）
   Phase 2: SELECT  - 候选对筛选（LSH + 元数据 + 文档向量预筛）
   Phase 3: ANALYZE - 逐对精细分析（查表点积，不调模型）
-  Phase 4: SCORE   - 风险评分与聚类
+  Phase 4: CLUSTER - 相似内容聚类与报告编排
   Phase 5: REPORT  - 生成报告
 """
 
 import os
 import glob
 import logging
+import time
 from datetime import datetime
 from typing import List, Dict
 from concurrent.futures import (
@@ -83,6 +84,8 @@ class BidDetectionOrchestrator:
 
         self._all_features_cache = None
         self._phase3_para_cache = {}
+        self._phase3_embedding_cache = {}
+        self._timings = {}
 
         logger.info("流式管道编排器已初始化")
 
@@ -307,6 +310,16 @@ class BidDetectionOrchestrator:
                         num_workers = min(num_workers, 8)
 
                     if num_workers <= 1:
+                        if getattr(self.config, 'PHASE3_PRELOAD_EMBEDDINGS', True):
+                            all_doc_ids = set()
+                            for doc_a_id, doc_b_id in pending_pairs:
+                                all_doc_ids.add(doc_a_id)
+                                all_doc_ids.add(doc_b_id)
+                            for did in all_doc_ids:
+                                try:
+                                    self._phase3_embedding_cache[did] = self.cache.load_all_paragraph_embeddings(did)
+                                except Exception as e:
+                                    logger.warning(f"预加载嵌入失败 ({did[:12]}...): {e}")
                         for idx, (doc_a_id, doc_b_id) in enumerate(pending_pairs, 1):
                             try:
                                 self._phase3_analyze_single(doc_a_id, doc_b_id)
@@ -340,20 +353,34 @@ class BidDetectionOrchestrator:
                             all_doc_ids.add(doc_b_id)
                         preload_start = datetime.now()
                         all_para_full = {}
+                        all_para_embeddings = {}
                         for did in all_doc_ids:
                             try:
                                 all_para_full[did] = self.cache.load_all_paragraphs_full(did)
+                                if getattr(self.config, 'PHASE3_PRELOAD_EMBEDDINGS', True):
+                                    all_para_embeddings[did] = self.cache.load_all_paragraph_embeddings(did)
                             except Exception as e:
                                 logger.warning(f"预加载段落失败 ({did[:12]}...): {e}")
                         preload_time = (datetime.now() - preload_start).total_seconds()
-                        logger.info(f"Phase 3: 预加载 {len(all_para_full)}/{len(all_doc_ids)} 个文档段落, 耗时 {preload_time:.2f}s")
+                        logger.info(
+                            f"Phase 3: 预加载 {len(all_para_full)}/{len(all_doc_ids)} 个文档段落, "
+                            f"{len(all_para_embeddings)} 个文档向量, 耗时 {preload_time:.2f}s"
+                        )
 
-                        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                        use_process_pool = getattr(self.config, 'PHASE3_USE_PROCESS_POOL', True)
+                        executor_cls = ProcessPoolExecutor if use_process_pool else ThreadPoolExecutor
+                        shared_matcher_arg = None if use_process_pool else shared_matcher
+                        para_full_arg = None if use_process_pool else all_para_full
+                        para_embeddings_arg = None if use_process_pool else all_para_embeddings
+                        pool_name = "多进程" if use_process_pool else "多线程"
+                        logger.info(f"Phase 3 执行器: {pool_name}, workers={num_workers}")
+
+                        with executor_cls(max_workers=num_workers) as executor:
                             future_to_pair = {}
                             for doc_a_id, doc_b_id in pending_pairs:
                                 future = executor.submit(
                                     analyze_pair_worker,
-                                    (doc_a_id, doc_b_id, config_dict, db_dir, shared_matcher, all_para_full)
+                                    (doc_a_id, doc_b_id, config_dict, db_dir, shared_matcher_arg, para_full_arg, para_embeddings_arg)
                                 )
                                 future_to_pair[future] = (doc_a_id, doc_b_id)
 
@@ -385,16 +412,18 @@ class BidDetectionOrchestrator:
                                     self.checkpoint.save(state)
 
                     analyze_time = (datetime.now() - analyze_start).total_seconds()
+                    self._timings['phase3_analyze'] = analyze_time
                     logger.info(f"Phase 3 完成: {len(completed_ids)} 对, 耗时 {analyze_time:.2f}s")
 
                 state.phase = 5
                 state.completed_pairs = len(completed_ids)
                 self.checkpoint.save(state)
                 self._phase3_para_cache.clear()
+                self._phase3_embedding_cache.clear()
 
             report = None
             if state.phase < 6:
-                logger.info("Phase 4: 风险评分...")
+                logger.info("Phase 4: 相似内容聚类...")
                 score_start = datetime.now()
                 pairwise_results = self.cache.load_all_results()
                 features = self._all_features_cache or self.cache.load_all_documents()
@@ -402,6 +431,7 @@ class BidDetectionOrchestrator:
                 state.phase = 6
                 self.checkpoint.save(state)
                 score_time = (datetime.now() - score_start).total_seconds()
+                self._timings['phase4_score'] = score_time
                 logger.info(f"Phase 4 完成: {report.suspicious_pairs} 对可疑, 耗时 {score_time:.2f}s")
 
             if state.phase >= 6 and report is None:
@@ -414,12 +444,20 @@ class BidDetectionOrchestrator:
                 report_start = datetime.now()
                 self.report_generator.generate(report, output_dir)
                 report_time = (datetime.now() - report_start).total_seconds()
+                self._timings['phase5_report'] = report_time
                 logger.info(f"Phase 5 完成: 报告已输出到 {output_dir}, 耗时 {report_time:.2f}s")
             else:
                 report = self._empty_report()
                 logger.warning("未生成任何报告数据")
 
             total_time = (datetime.now() - process_start).total_seconds()
+            if getattr(self.config, 'PERF_LOG_ENABLED', True):
+                timing_summary = ", ".join(
+                    f"{name}={seconds:.2f}s"
+                    for name, seconds in self._timings.items()
+                )
+                if timing_summary:
+                    logger.info(f"性能埋点: {timing_summary}")
             logger.info("=" * 60)
             logger.info(f"检测完成! 总耗时: {total_time:.2f}s")
             logger.info("=" * 60)
@@ -450,6 +488,12 @@ class BidDetectionOrchestrator:
                 doc_id = self.extractor._generate_doc_id(file_path)
                 filename = os.path.basename(file_path)
                 file_size = os.path.getsize(file_path)
+
+                # 不覆盖已提取的文档特征（Phase 0 仅存储元数据占位）
+                existing = self.cache.load_document(doc_id)
+                if existing and existing.doc_minhash:
+                    logger.debug(f"Phase 0: 跳过已提取文档 {filename}")
+                    continue
 
                 feature = BidFeature(
                     doc_id=doc_id,
@@ -501,13 +545,21 @@ class BidDetectionOrchestrator:
         )
 
         if start_page >= page_count and page_count > 0:
-            logger.info(f"文档已完全提取: {filename}")
-            try:
-                fp = extract_contacts_from_sqlite(doc_id, self.cache)
-                self.cache.store_contact_fingerprint(doc_id, fp.to_json())
-            except Exception:
-                pass
-            return
+            # 检查文档特征是否已存储（含 doc_minhash）
+            existing_doc = self.cache.load_document(doc_id)
+            if existing_doc and existing_doc.doc_minhash:
+                logger.info(f"文档已完全提取: {filename}")
+                try:
+                    fp = extract_contacts_from_sqlite(doc_id, self.cache)
+                    self.cache.store_contact_fingerprint(doc_id, fp.to_json())
+                except Exception:
+                    pass
+                return
+            else:
+                # chunks 已缓存但文档特征缺失（doc_minhash 为空），需重新提取
+                logger.warning(f"文档 {filename} 的 chunks 已缓存但特征缺失，重新提取")
+                self.cache.delete_document_chunks(doc_id)
+                start_page = 0
 
         chunks = []
         chunk_size = self.config.CHUNK_PAGE_SIZE
@@ -714,6 +766,16 @@ class BidDetectionOrchestrator:
             self.checkpoint.save(state)
             return
 
+        # ── PyTorch 线程数优化：CPU 模式下 8 线程已达峰值 ──
+        try:
+            import torch
+            optimal_threads = min(8, os.cpu_count() or 4)
+            if torch.get_num_threads() != optimal_threads:
+                torch.set_num_threads(optimal_threads)
+                logger.debug(f"Phase 1.5: PyTorch 线程数设为 {optimal_threads}")
+        except Exception:
+            pass
+
         logger.info(f"Phase 1.5: 准备编码 {len(features)} 个文档的段落嵌入")
 
         dimension = self.config.ANALYSIS_DIMENSION
@@ -721,49 +783,18 @@ class BidDetectionOrchestrator:
             logger.info(f"Phase 1.5: 仅编码 {dimension} 页面段落")
 
         import numpy as np
+        import hashlib as _hashlib
 
-        batch_size = max(64, self.config.SBERT_BATCH_SIZE)
+        batch_size = max(32, self.config.SBERT_BATCH_SIZE)
         accumulate_size = 512
 
-        all_paragraphs = []
-        all_doc_ids = []
-        all_para_indices = []
+        # ── 阶段A: 加载所有段落 + 检查已有嵌入缓存 ──
+        # 结构: {doc_id: {para_idx: text}}  待编码段落
+        #        {doc_id: {para_idx: embedding}}  已有缓存嵌入
+        pending_by_doc = {}
+        cached_by_doc = {}
         total_paragraphs = 0
-
-        def flush_batch():
-            nonlocal total_paragraphs
-            if not all_paragraphs:
-                return
-            try:
-                logger.debug(f"Phase 1.5: 批量编码 {len(all_paragraphs)} 个段落...")
-                embeddings = engine.model.encode(
-                    all_paragraphs,
-                    batch_size=batch_size,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                )
-
-                doc_embeddings = {}
-                for idx, (doc_id, para_idx) in enumerate(zip(all_doc_ids, all_para_indices)):
-                    if doc_id not in doc_embeddings:
-                        doc_embeddings[doc_id] = []
-                    doc_embeddings[doc_id].append(embeddings[idx])
-
-                for doc_id, doc_embs in doc_embeddings.items():
-                    doc_embedding = np.mean(doc_embs, axis=0).astype(np.float32)
-                    self.cache.store_document_embedding(doc_id, doc_embedding)
-
-                self.cache.store_paragraph_embeddings_batch(
-                    list(zip(all_doc_ids, all_para_indices, embeddings))
-                )
-                total_paragraphs += len(all_paragraphs)
-                logger.debug(f"Phase 1.5: 批量完成，累计 {total_paragraphs} 个段落")
-            except Exception as e:
-                logger.error(f"Phase 1.5: 批量编码失败: {e}", exc_info=True)
-            finally:
-                all_paragraphs.clear()
-                all_doc_ids.clear()
-                all_para_indices.clear()
+        cached_count = 0
 
         for doc_feat in features:
             if not doc_feat.doc_minhash:
@@ -780,25 +811,162 @@ class BidDetectionOrchestrator:
                 else:
                     paragraphs = self.cache.load_all_paragraphs_text(doc_feat.doc_id)
 
-                if paragraphs:
-                    for para_idx, text in enumerate(paragraphs):
-                        all_paragraphs.append(text)
-                        all_doc_ids.append(doc_feat.doc_id)
-                        all_para_indices.append(para_idx)
+                if not paragraphs:
+                    continue
 
-                        if len(all_paragraphs) >= accumulate_size:
-                            flush_batch()
+                # 检查已有嵌入
+                existing = self.cache.load_all_paragraph_embeddings(doc_feat.doc_id)
+                pending = {}
+                for para_idx, text in enumerate(paragraphs):
+                    total_paragraphs += 1
+                    if para_idx in existing:
+                        cached_by_doc.setdefault(doc_feat.doc_id, {})[para_idx] = existing[para_idx]
+                        cached_count += 1
+                    else:
+                        pending[para_idx] = text
+
+                if pending:
+                    pending_by_doc[doc_feat.doc_id] = pending
 
             except Exception as e:
                 logger.error(f"段落加载失败 ({doc_feat.filename}): {e}", exc_info=True)
                 continue
 
-        flush_batch()
+        if cached_count > 0:
+            logger.info(f"Phase 1.5: 嵌入缓存命中 {cached_count}/{total_paragraphs} 段落 "
+                        f"({cached_count/total_paragraphs*100:.1f}%)")
+
+        if not pending_by_doc:
+            logger.info("Phase 1.5: 所有段落嵌入已缓存，跳过编码")
+            # 仍需确保文档级嵌入存在
+            self._ensure_document_embeddings(cached_by_doc)
+            state.phase = 3
+            self.checkpoint.save(state)
+            embed_time = (datetime.now() - embed_start).total_seconds()
+            self._timings['phase15_embed'] = embed_time
+            logger.info(f"Phase 1.5 完成: {total_paragraphs} 个段落 (全部缓存命中), 耗时 {embed_time:.2f}s")
+            return
+
+        # ── 阶段B: 段落文本去重（相同文本只编码一次）──
+        # text_hash -> (text, [(doc_id, para_idx), ...])
+        unique_texts = {}
+        for doc_id, paras in pending_by_doc.items():
+            for para_idx, text in paras.items():
+                if not text:
+                    continue
+                h = _hashlib.md5(text.encode('utf-8')).hexdigest()
+                if h not in unique_texts:
+                    unique_texts[h] = (text, [])
+                unique_texts[h][1].append((doc_id, para_idx))
+
+        unique_count = len(unique_texts)
+        pending_count = sum(len(p) for p in pending_by_doc.values())
+        dedup_count = pending_count - unique_count
+        if dedup_count > 0:
+            logger.info(f"Phase 1.5: 段落去重 {pending_count} -> {unique_count} "
+                        f"(减少 {dedup_count}, {dedup_count/pending_count*100:.1f}%)")
+
+        # ── 阶段C: 批量编码唯一文本 ──
+        all_texts = [v[0] for v in unique_texts.values()]
+        all_hashes = list(unique_texts.keys())
+        new_embeddings = {}  # hash -> embedding
+        encoded_count = 0
+        model_name = 'paraphrase-multilingual-MiniLM-L12-v2'
+
+        text_cache_hits = {}
+        if getattr(self.config, 'ENABLE_TEXT_EMBEDDING_CACHE', True):
+            cache_lookup_start = datetime.now()
+            text_cache_hits = self.cache.load_text_embedding_cache(all_hashes, model_name)
+            self._timings['phase15_text_cache_lookup'] = (
+                datetime.now() - cache_lookup_start
+            ).total_seconds()
+            if text_cache_hits:
+                logger.info(
+                    f"Phase 1.5: text_hash 嵌入缓存命中 "
+                    f"{len(text_cache_hits)}/{len(all_hashes)} "
+                    f"({len(text_cache_hits)/max(len(all_hashes), 1)*100:.1f}%)"
+                )
+                new_embeddings.update(text_cache_hits)
+
+        encode_pairs = [
+            (h, text) for h, text in zip(all_hashes, all_texts)
+            if h not in text_cache_hits
+        ]
+        encode_hashes = [h for h, _text in encode_pairs]
+        encode_texts = [text for _h, text in encode_pairs]
+        cache_store_items = []
+
+        encode_start = datetime.now()
+        for batch_start in range(0, len(encode_texts), accumulate_size):
+            batch_texts = encode_texts[batch_start:batch_start + accumulate_size]
+            batch_hashes = encode_hashes[batch_start:batch_start + accumulate_size]
+            try:
+                logger.debug(f"Phase 1.5: 批量编码 {len(batch_texts)} 个唯一段落...")
+                embeddings = engine.model.encode(
+                    batch_texts,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=getattr(self.config, 'NORMALIZE_EMBEDDINGS', True),
+                )
+                for i, h in enumerate(batch_hashes):
+                    new_embeddings[h] = embeddings[i]
+                    cache_store_items.append((h, embeddings[i]))
+                encoded_count += len(batch_texts)
+                logger.debug(f"Phase 1.5: 批量完成，累计 {encoded_count} 个唯一段落")
+            except Exception as e:
+                logger.error(f"Phase 1.5: 批量编码失败: {e}", exc_info=True)
+        self._timings['phase15_sbert_encode'] = (
+            datetime.now() - encode_start
+        ).total_seconds()
+
+        if cache_store_items and getattr(self.config, 'ENABLE_TEXT_EMBEDDING_CACHE', True):
+            cache_store_start = datetime.now()
+            self.cache.store_text_embedding_cache(cache_store_items, model_name)
+            self._timings['phase15_text_cache_store'] = (
+                datetime.now() - cache_store_start
+            ).total_seconds()
+
+        # ── 阶段D: 存储嵌入 + 计算文档级嵌入 ──
+        # 合并缓存嵌入和新编码嵌入
+        all_embeddings_by_doc = {doc_id: dict(cached) for doc_id, cached in cached_by_doc.items()}
+
+        store_batch = []
+        for h, (text, locations) in unique_texts.items():
+            if h not in new_embeddings:
+                continue
+            emb = new_embeddings[h]
+            for doc_id, para_idx in locations:
+                store_batch.append((doc_id, para_idx, emb))
+                all_embeddings_by_doc.setdefault(doc_id, {})[para_idx] = emb
+
+        if store_batch:
+            self.cache.store_paragraph_embeddings_batch(store_batch)
+            logger.debug(f"Phase 1.5: 存储 {len(store_batch)} 个段落嵌入")
+
+        # 计算并存储文档级嵌入（均值池化）
+        self._ensure_document_embeddings(all_embeddings_by_doc)
 
         state.phase = 3
         self.checkpoint.save(state)
         embed_time = (datetime.now() - embed_start).total_seconds()
-        logger.info(f"Phase 1.5 完成: {total_paragraphs} 个段落已编码, 耗时 {embed_time:.2f}s")
+        self._timings['phase15_embed'] = embed_time
+        logger.info(f"Phase 1.5 完成: {total_paragraphs} 个段落 "
+                    f"(缓存 {cached_count}, 新编码 {len(store_batch)}, 唯一 {unique_count}), "
+                    f"耗时 {embed_time:.2f}s")
+
+    def _ensure_document_embeddings(self, embeddings_by_doc: dict) -> None:
+        """计算并存储文档级嵌入（如果尚不存在）"""
+        import numpy as np
+        existing_doc_embs = self.cache.load_all_document_embeddings()
+        for doc_id, para_embs in embeddings_by_doc.items():
+            if not para_embs:
+                continue
+            if doc_id in existing_doc_embs:
+                continue
+            emb_array = np.array(list(para_embs.values()))
+            doc_embedding = np.mean(emb_array, axis=0).astype(np.float32)
+            self.cache.store_document_embedding(doc_id, doc_embedding)
 
     def _get_para_full(self, doc_id: str) -> Dict[int, dict]:
         if doc_id not in self._phase3_para_cache:
@@ -885,6 +1053,8 @@ class BidDetectionOrchestrator:
                         doc_a, doc_b, self.cache,
                         para_full_a=para_full_a,
                         para_full_b=para_full_b,
+                        para_embeddings_a=self._phase3_embedding_cache.get(doc_a_id),
+                        para_embeddings_b=self._phase3_embedding_cache.get(doc_b_id),
                     )
 
             # 按维度过滤图片哈希（仅保留指定页面的图片）
@@ -945,7 +1115,7 @@ class BidDetectionOrchestrator:
             metadata_evidence = self._build_metadata_evidence(doc_a, doc_b)
 
         image_evidence = ImageEvidence()
-        if cs:
+        if cs and getattr(self.config, 'ENABLE_IMAGE_ANALYSIS', True):
             image_evidence = self._build_image_evidence(doc_a, doc_b)
 
         contact_evidence = ContactEvidence()
@@ -976,8 +1146,12 @@ class BidDetectionOrchestrator:
         evidence.common_image_count = len(common_exact)
         evidence.common_image_hashes = common_exact
 
-        ocr_a = self.cache.load_image_ocr_results(doc_a.doc_id)
-        ocr_b = self.cache.load_image_ocr_results(doc_b.doc_id)
+        if self.config.ENABLE_OCR:
+            ocr_a = self.cache.load_image_ocr_results(doc_a.doc_id)
+            ocr_b = self.cache.load_image_ocr_results(doc_b.doc_id)
+        else:
+            ocr_a = []
+            ocr_b = []
 
         if ocr_a:
             evidence.ocr_results_a = ocr_a
@@ -1086,7 +1260,7 @@ class BidDetectionOrchestrator:
             doc_b.image_hashes = self._filter_hashes_by_dimension(orig_hb, doc_b)
 
         image_evidence = ImageEvidence()
-        if dims.get('content_similarity', True):
+        if dims.get('content_similarity', True) and getattr(self.config, 'ENABLE_IMAGE_ANALYSIS', True):
             image_evidence = self._build_image_evidence(doc_a, doc_b)
 
         # 恢复原始图片哈希

@@ -46,19 +46,19 @@ ITEM_CODES = {
     "FILE_CODE_SIMILAR": "文件码雷同",
     "EDITOR_SIGNER_SIMILAR": "编辑经办人雷同",
     "DOC_AUTHOR_SIMILAR": "文档作者雷同",
-    "BID_COMPANY_NAME_ABNORMAL": "投标文件公司名称异常",
-    "SAME_BID_CONTACT_SIMILAR": "同标段单位联系人雷同",
+    "SAME_BID_CONTACT_SIMILAR": "人名雷同",
+    "SAME_bidderName_SIMILAR": "公司名雷同",
     "TECH_BID_SIMILAR": "技术标雷同",
-    "COM_BID_SIMILAR": "商务标雷同",
+    "BID_COMPANY_NAME_ABNORMAL": "商务标雷同",
 }
 
 LIGHTWEIGHT_ITEMS = {
     "FILE_CODE_SIMILAR", "EDITOR_SIGNER_SIMILAR", "DOC_AUTHOR_SIMILAR",
-    "BID_COMPANY_NAME_ABNORMAL", "SAME_BID_CONTACT_SIMILAR",
+    "SAME_BID_CONTACT_SIMILAR", "SAME_bidderName_SIMILAR",
 }
 
 HEAVY_ITEMS = {
-    "TECH_BID_SIMILAR", "COM_BID_SIMILAR",
+    "TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL",
 }
 
 DEFAULT_API_URL = "http://localhost:8001"
@@ -205,7 +205,7 @@ class ServerTester:
 
     def test_analyze(self, label: str, item_code: str, companies: list,
                      batch_id: int = None, expect_error: int = None) -> dict:
-        """测试单项检查（完整异步轮询）"""
+        """测试单项检查（同步接口，直接返回结果）"""
         if not self.quiet:
             divider(f"{label} ({item_code})")
         else:
@@ -220,8 +220,11 @@ class ServerTester:
             "companies": companies,
         }
 
+        # 同步接口：POST 直接返回 AnalyzeResponse（HTTP 200）
+        # 重量维度可能耗时数分钟，超时设为 1800s
+        timeout = 1800 if item_code in HEAVY_ITEMS else 60
         r = self._req("POST", "/api/v1/collusive-check/items/analyze",
-                      json=payload, timeout=30)
+                      json=payload, timeout=timeout)
         if r is None:
             if not self.quiet:
                 fail("无法连接 API")
@@ -238,41 +241,22 @@ class ServerTester:
                     fail(f"期望状态码 {expect_error}，实际 {r.status_code}")
                 return {"passed": False, "data": None, "error": f"status_{r.status_code}"}
 
-        if r.status_code != 202:
+        if r.status_code != 200:
             if not self.quiet:
-                fail(f"提交失败 (HTTP {r.status_code})")
-            return {"passed": False, "data": None, "error": f"submit_failed_{r.status_code}"}
+                fail(f"检查失败 (HTTP {r.status_code}): {r.text[:200]}")
+            return {"passed": False, "data": None, "error": f"http_{r.status_code}"}
 
-        task_data = r.json()
-        task_id = task_data.get("taskId")
-        if not self.quiet:
-            ok(f"任务已提交: taskId={task_id[:8]}...")
-
-        deadline = time.time() + MAX_POLL_TIME
-        result = None
-        while time.time() < deadline:
-            time.sleep(POLL_INTERVAL)
-            r = self._req("GET", f"/api/v1/collusive-check/items/{task_id}")
-            if r is None:
-                return {"passed": False, "data": None, "error": "poll_connection_error"}
-            status = r.json().get("status")
-            if status in ("completed", "failed"):
-                result = r.json()
-                break
-
-        if result is None:
-            return {"passed": False, "data": None, "error": "timeout"}
-
-        analyze_result = result.get("result", {})
-        company_results = analyze_result.get("results", [])
+        result = r.json()
+        company_results = result.get("results", [])
         if not self.quiet:
             log(f"\n结果摘要:")
             for cr in company_results:
                 icon = "PASS" if cr["status"] == "SUCCESS" else "FAIL"
                 log(f"  [{icon}] ID={cr['companyRecordId']:>4d}  {cr['status']:7s}  {cr['summary']}")
 
-        completed_status = result.get("status") == "completed"
-        return {"passed": completed_status, "data": result, "error": None}
+        # 同步接口只要有 results 即为成功
+        has_results = len(company_results) > 0
+        return {"passed": has_results, "data": result, "error": None}
 
     # ── 完整测试套件 ──────────────────────────────────────
 
@@ -381,7 +365,7 @@ class ServerTester:
                 shutil.copy2(str(pdf_path), str(dest_dir / f"{companies_heavy[-1]['companyRecordId']}_{sanitized_name}.pdf"))
 
             for item_code, item_name in [("TECH_BID_SIMILAR", "技术标雷同"),
-                                         ("COM_BID_SIMILAR", "商务标雷同")]:
+                                         ("BID_COMPANY_NAME_ABNORMAL", "商务标雷同")]:
                 ok(f"{item_name}（重量级，首次运行耗时较长）")
                 result = self.test_analyze(item_name, item_code, companies_heavy, batch_id=batch_id)
                 if result["passed"]:

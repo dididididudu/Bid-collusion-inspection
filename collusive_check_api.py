@@ -24,6 +24,7 @@ import sys
 import json
 import time
 import uuid
+import asyncio
 import logging
 import hashlib
 import threading
@@ -63,6 +64,9 @@ DOWNLOAD_RETRIES = 3
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 os.makedirs(WORK_DIR, exist_ok=True)
 
+# 全局 SBERT 模型（只读，线程安全，startup 时加载，供 _run_full_pipeline 注入）
+_global_sbert_model = None
+
 # ============================================================
 # itemCode → 检查项名称映射
 # ============================================================
@@ -71,22 +75,22 @@ ITEM_CODE_NAMES: Dict[str, str] = {
     "FILE_CODE_SIMILAR": "文件码雷同",
     "EDITOR_SIGNER_SIMILAR": "编辑经办人雷同",
     "DOC_AUTHOR_SIMILAR": "文档作者雷同",
-    "BID_COMPANY_NAME_ABNORMAL": "投标文件公司名称异常",
-    "SAME_BID_CONTACT_SIMILAR": "同标段单位联系人雷同",
+    "SAME_BID_CONTACT_SIMILAR": "人名雷同",
+    "SAME_bidderName_SIMILAR": "公司名雷同",
     "TECH_BID_SIMILAR": "技术标雷同",
-    "COM_BID_SIMILAR": "商务标雷同",
+    "BID_COMPANY_NAME_ABNORMAL": "商务标雷同",
 }
 
-# 轻量检查（无需全量管线）
+# 轻量检查（无需全量管线，秒级返回）
 LIGHTWEIGHT_ITEMS = {
     "FILE_CODE_SIMILAR", "EDITOR_SIGNER_SIMILAR", "DOC_AUTHOR_SIMILAR",
-    "BID_COMPANY_NAME_ABNORMAL", "SAME_BID_CONTACT_SIMILAR",
+    "SAME_BID_CONTACT_SIMILAR", "SAME_bidderName_SIMILAR",
 }
 
-# 重量检查（技术标 + 商务标，各包含文本+图片）
+# 重量检查（技术标 + 商务标，各包含文本+图片，需走完整管道）
 TECH_BID_ITEMS = {"TECH_BID_SIMILAR"}
-COM_BID_ITEMS = {"COM_BID_SIMILAR"}
-HEAVY_ITEMS = TECH_BID_ITEMS | COM_BID_ITEMS
+COMMERCIAL_BID_ITEMS = {"BID_COMPANY_NAME_ABNORMAL"}
+HEAVY_ITEMS = TECH_BID_ITEMS | COMMERCIAL_BID_ITEMS
 
 # ============================================================
 # Pydantic 数据模型
@@ -120,95 +124,38 @@ class AnalyzeResponse(BaseModel):
     itemName: str
     results: List[CompanyResult]
 
-class TaskStatus(BaseModel):
-    taskId: str
-    batchId: int
-    itemCode: str
-    status: str          # pending / processing / completed / failed
-    result: Optional[AnalyzeResponse] = None
-    error: Optional[str] = None
-    created_at: str = ""
-    completed_at: str = ""
+class BatchCache:
+    """批次级管线结果缓存（heavy items 复用，线程安全）
 
-# ============================================================
-# 任务管理器
-# ============================================================
-
-class TaskRecord:
-    def __init__(self, task_id: str, batch_id: int, item_code: str, companies: List[CompanyInfo]):
-        self.task_id = task_id
-        self.batch_id = batch_id
-        self.item_code = item_code
-        self.companies = companies
-        self.status = "pending"
-        self.result: Optional[AnalyzeResponse] = None
-        self.error: Optional[str] = None
-        self.created_at = datetime.now().isoformat()
-        self.completed_at = ""
-        self._lock = threading.Lock()
-
-    def to_dict(self) -> dict:
-        with self._lock:
-            return {
-                "taskId": self.task_id,
-                "batchId": self.batch_id,
-                "itemCode": self.item_code,
-                "status": self.status,
-                "result": self.result.model_dump() if self.result else None,
-                "error": self.error,
-                "created_at": self.created_at,
-                "completed_at": self.completed_at,
-            }
-
-
-class TaskManager:
-    """异步任务管理器（内存存储，进程内有效）"""
+    同 batch + 同 dimension 的管线结果缓存 CACHE_TTL 秒，
+    避免技术标/商务标分别调用时重复跑全量管道。
+    """
 
     def __init__(self):
-        self._tasks: Dict[str, TaskRecord] = {}
+        self._cache: Dict[str, dict] = {}
+        self._cache_time: Dict[str, float] = {}
         self._lock = threading.Lock()
-        # 批次级检测结果缓存（heavy items 复用）
-        self._batch_cache: Dict[str, dict] = {}
-        self._batch_cache_time: Dict[str, float] = {}
 
-    def create_task(self, batch_id: int, item_code: str, companies: List[CompanyInfo]) -> str:
-        task_id = str(uuid.uuid4())
-        record = TaskRecord(task_id, batch_id, item_code, companies)
+    def get(self, key: str) -> Optional[dict]:
         with self._lock:
-            self._tasks[task_id] = record
-        return task_id
-
-    def get_task(self, task_id: str) -> Optional[TaskRecord]:
-        with self._lock:
-            return self._tasks.get(task_id)
-
-    def update_task(self, task_id: str, **kwargs):
-        with self._lock:
-            record = self._tasks.get(task_id)
-            if record:
-                for k, v in kwargs.items():
-                    setattr(record, k, v)
-
-    def get_batch_cache(self, key) -> Optional[dict]:
-        with self._lock:
-            cached = self._batch_cache.get(key)
-            ts = self._batch_cache_time.get(key, 0)
+            cached = self._cache.get(key)
+            ts = self._cache_time.get(key, 0)
             if cached and (time.time() - ts) < CACHE_TTL:
                 return cached
         return None
 
-    def set_batch_cache(self, key, data: dict):
+    def set(self, key: str, data: dict):
         with self._lock:
-            self._batch_cache[key] = data
-            self._batch_cache_time[key] = time.time()
+            self._cache[key] = data
+            self._cache_time[key] = time.time()
 
-    def invalidate_batch_cache(self, key):
+    def invalidate(self, key: str):
         with self._lock:
-            self._batch_cache.pop(key, None)
-            self._batch_cache_time.pop(key, None)
+            self._cache.pop(key, None)
+            self._cache_time.pop(key, None)
 
 
-task_manager = TaskManager()
+batch_cache = BatchCache()
 
 # ============================================================
 # PDF 下载器
@@ -542,11 +489,14 @@ def handle_doc_author_similar(
     return results
 
 
-def handle_company_name_abnormal(
+def handle_bidder_name_similar(
     companies: List[CompanyInfo],
     pdf_paths: Dict[int, str],
 ) -> List[CompanyResult]:
-    """投标文件公司名称异常 — 检测本公司文件中出现其他投标公司名称"""
+    """公司名雷同检测 — 本公司文件中出现其他投标公司名称
+
+    对应 itemCode: SAME_bidderName_SIMILAR
+    """
     from extraction.contact_extractor import extract_contacts_from_text
 
     company_name_in_docs: Dict[int, List[str]] = {}
@@ -590,7 +540,7 @@ def handle_company_name_abnormal(
             results.append(CompanyResult(
                 companyRecordId=cid, registrationCompanyId=c.registrationCompanyId,
                 sectionId=c.sectionId, status="SUCCESS",
-                summary="未发现公司名称异常", evidence={},
+                summary="未发现公司名雷同", evidence={},
             ))
     return results
 
@@ -725,9 +675,10 @@ def _run_full_pipeline(
         }
     """
     dimension = "technical" if item_code in TECH_BID_ITEMS else "commercial"
+    # BID_COMPANY_NAME_ABNORMAL → commercial; TECH_BID_SIMILAR → technical
     cache_key = f"{batch_id}_{dimension}"
 
-    cached = task_manager.get_batch_cache(cache_key)
+    cached = batch_cache.get(cache_key)
     if cached:
         logger.info(f"复用 {dimension} 管线结果 (batch {batch_id})")
         return cached
@@ -735,7 +686,11 @@ def _run_full_pipeline(
     from config import DetectionConfig
     from pipeline.orchestrator import BidDetectionOrchestrator
 
-    work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}_{uuid.uuid4().hex[:8]}")
+    stable_workdir = os.environ.get("COLLUSIVE_STABLE_WORKDIR", "1").lower() in ("1", "true", "yes")
+    if stable_workdir:
+        work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}_{dimension}")
+    else:
+        work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}_{dimension}_{uuid.uuid4().hex[:8]}")
     input_dir = os.path.join(work_dir, "input")
     output_dir = os.path.join(work_dir, "output")
     cache_dir = os.path.join(work_dir, "cache")
@@ -755,17 +710,36 @@ def _run_full_pipeline(
     config = DetectionConfig()
     config.CACHE_DIR = cache_dir
     config.CHECKPOINT_DIR = ckpt_dir
-    config.ENABLE_OCR = True
+    config.TEXT_EMBEDDING_CACHE_DIR = os.environ.get(
+        "TEXT_EMBEDDING_CACHE_DIR",
+        os.path.join(WORK_DIR, "shared_embedding_cache"),
+    )
+    config.ENABLE_OCR = os.environ.get("COLLUSIVE_ENABLE_OCR", "1").lower() in ("1", "true", "yes")
+    config.ENABLE_IMAGE_ANALYSIS = os.environ.get("COLLUSIVE_ENABLE_IMAGE_ANALYSIS", "1").lower() in ("1", "true", "yes")
     config.OCR_ENGINE = "paddleocr"
     config.USE_GPU = False
     config.SBERT_DEVICE = "cpu"
+    config.SBERT_BATCH_SIZE = int(os.environ.get("SBERT_BATCH_SIZE", config.SBERT_BATCH_SIZE))
+    config.PHASE1_WORKERS = int(os.environ.get("PHASE1_WORKERS", config.PHASE1_WORKERS))
+    config.PHASE3_WORKERS = int(os.environ.get("PHASE3_WORKERS", config.PHASE3_WORKERS))
     config.TOC_FILTER_ENABLED = True
     config.ANALYSIS_DIMENSION = dimension
 
-    logger.info(f"运行全量管线: {len(pdf_paths)} 个文件")
+    logger.info(f"运行全量管线: {len(pdf_paths)} 个文件, dimension={dimension}")
     t0 = time.time()
 
     orchestrator = BidDetectionOrchestrator(config)
+
+    # 注入全局 SBERT 模型（避免每个任务重复加载 ~500MB 模型）
+    if _global_sbert_model is not None:
+        try:
+            orchestrator.embedding_engine.set_model(_global_sbert_model)
+            orchestrator.paragraph_matcher._ensure_semantic_matcher()
+            orchestrator.paragraph_matcher.semantic_matcher.set_model(_global_sbert_model)
+            logger.info("全局 SBERT 模型已注入 EmbeddingEngine 和 ParagraphMatcher")
+        except Exception as e:
+            logger.warning(f"SBERT 模型注入失败: {e}")
+
     report = orchestrator.detect(input_dir, output_dir)
 
     elapsed = time.time() - t0
@@ -794,6 +768,7 @@ def _run_full_pipeline(
 
         tech_matches = []
         com_matches = []
+        all_matches = []
         for pm in te.paragraph_matches:
             dim = pm.get("_dimension_tag", pm.get("dimension", "unknown"))
             if dim in ("tech_text", "tech_image"):
@@ -802,6 +777,21 @@ def _run_full_pipeline(
                 com_matches.append(pm)
             else:
                 tech_matches.append(pm)
+            all_matches.append(pm)
+
+        # 提取段落匹配摘要（限制数量与长度，避免响应过大）
+        match_summaries = []
+        for pm in all_matches[:20]:
+            text_a = (pm.get("paragraph_a", "") or "")[:300]
+            text_b = (pm.get("paragraph_b", "") or "")[:300]
+            match_summaries.append({
+                "paragraph_a": text_a,
+                "paragraph_b": text_b,
+                "similarity": round(pm.get("similarity", 0.0), 4),
+                "paragraph_a_index": pm.get("paragraph_a_index", -1),
+                "paragraph_b_index": pm.get("paragraph_b_index", -1),
+                "detection_method": pm.get("detection_method", ""),
+            })
 
         text_results[pair_key] = {
             "similarity": te.local_similarity,
@@ -810,16 +800,27 @@ def _run_full_pipeline(
             "has_tech_match": len(tech_matches) > 0,
             "has_com_match": len(com_matches) > 0,
             "pair_ids": {"a": a_rec, "b": b_rec},
+            "paragraph_matches": match_summaries,
         }
 
         tech_img_count = 0
         com_img_count = 0
+        image_pair_summaries = []
         for img_pair in ie.matched_image_pairs:
             dim = img_pair.get("_dimension_tag", "unknown")
             if dim in ("tech_image", "tech_image+com_image"):
                 tech_img_count += 1
             if dim in ("com_image", "tech_image+com_image"):
                 com_img_count += 1
+            if len(image_pair_summaries) < 20:
+                image_pair_summaries.append({
+                    "source_a": img_pair.get("source_a", ""),
+                    "source_b": img_pair.get("source_b", ""),
+                    "confidence": round(img_pair.get("confidence", 0.0), 4),
+                    "reasons": img_pair.get("reasons", []),
+                    "ocr_text_a": (img_pair.get("ocr_text_a", "") or "")[:200],
+                    "ocr_text_b": (img_pair.get("ocr_text_b", "") or "")[:200],
+                })
 
         image_results[pair_key] = {
             "total_image_matches": ie.common_image_count,
@@ -828,6 +829,7 @@ def _run_full_pipeline(
             "has_tech_image": tech_img_count > 0,
             "has_com_image": com_img_count > 0,
             "pair_ids": {"a": a_rec, "b": b_rec},
+            "matched_image_pairs": image_pair_summaries,
         }
 
     meta_index = {}
@@ -845,13 +847,14 @@ def _run_full_pipeline(
         "dimension": dimension,
     }
 
-    task_manager.set_batch_cache(cache_key, result)
+    batch_cache.set(cache_key, result)
 
-    def _cleanup():
-        time.sleep(300)
-        if os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
-    threading.Thread(target=_cleanup, daemon=True).start()
+    if os.environ.get("COLLUSIVE_KEEP_WORKDIR", "1").lower() not in ("1", "true", "yes"):
+        def _cleanup():
+            time.sleep(43200)  # 12 小时后清理
+            if os.path.exists(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
+        threading.Thread(target=_cleanup, daemon=True).start()
 
     return result
 
@@ -863,63 +866,84 @@ def _get_company_results_from_pipeline(
 ) -> List[CompanyResult]:
     """从管线结果中提取指定 itemCode 的公司级结果
 
-    TECH_BID_SIMILAR: 检查 tech 维度的文本 + 图片匹配
-    COM_BID_SIMILAR:  检查 com 维度的文本 + 图片匹配
+    管道已通过 ANALYSIS_DIMENSION 单维度过滤，无需再拆 tech/com 子计数。
+    直接用 text_results / image_results 的总体匹配判定 FAILED/SUCCESS。
+
+    TECH_BID_SIMILAR:           technical 维度
+    BID_COMPANY_NAME_ABNORMAL:  commercial 维度
+
+    evidence 字段包含详细证据：
+    - 文本相似: similarParagraphs（段落内容 + 相似度 + 公司ID）
+    - 图片相似: similarImages（图片引用 + 置信度 + 公司ID）
     """
     text_results = pipeline_result.get("text_results", {})
     image_results = pipeline_result.get("image_results", {})
     dimension = pipeline_result.get("dimension", "technical")
-
-    is_tech = dimension == "technical"
-    is_com = dimension == "commercial"
-    dim_label = "技术标" if is_tech else "商务标"
+    dim_label = "技术标" if dimension == "technical" else "商务标"
 
     company_evidence: Dict[int, dict] = {}
     for c in companies:
         cid = c.companyRecordId
-        company_evidence[cid] = {"similar_ids": set(), "details": []}
+        company_evidence[cid] = {
+            "similar_ids": set(),
+            "text_details": [],
+            "image_details": [],
+        }
 
     for pair_key, tr in text_results.items():
         a, b = tr["pair_ids"]["a"], tr["pair_ids"]["b"]
-        if (is_tech and tr.get("has_tech_match")) or (is_com and tr.get("has_com_match")):
+        if tr.get("similarity", 0) >= 0.3 or tr.get("has_tech_match") or tr.get("has_com_match"):
             company_evidence[a]["similar_ids"].add(b)
             company_evidence[b]["similar_ids"].add(a)
-            company_evidence[a]["details"].append({
-                "type": "text", "similarity": tr["similarity"],
+            # 提取段落匹配详情
+            para_matches = tr.get("paragraph_matches", [])
+            company_evidence[a]["text_details"].append({
                 "companyRecordId": b,
+                "similarity": round(tr.get("similarity", 0.0), 4),
+                "paragraphMatches": para_matches,
             })
-            company_evidence[b]["details"].append({
-                "type": "text", "similarity": tr["similarity"],
+            company_evidence[b]["text_details"].append({
                 "companyRecordId": a,
+                "similarity": round(tr.get("similarity", 0.0), 4),
+                "paragraphMatches": para_matches,
             })
 
     for pair_key, ir in image_results.items():
         a, b = ir["pair_ids"]["a"], ir["pair_ids"]["b"]
-        if (is_tech and ir.get("has_tech_image")) or (is_com and ir.get("has_com_image")):
+        if ir.get("total_image_matches", 0) > 0 or ir.get("has_tech_image") or ir.get("has_com_image"):
             company_evidence[a]["similar_ids"].add(b)
             company_evidence[b]["similar_ids"].add(a)
-            company_evidence[a]["details"].append({
-                "type": "image", "imageMatches": ir.get("total_image_matches", 0),
+            # 提取图片匹配详情
+            img_pairs = ir.get("matched_image_pairs", [])
+            company_evidence[a]["image_details"].append({
                 "companyRecordId": b,
+                "imageMatchCount": ir.get("total_image_matches", 0),
+                "similarImages": img_pairs,
             })
-            company_evidence[b]["details"].append({
-                "type": "image", "imageMatches": ir.get("total_image_matches", 0),
+            company_evidence[b]["image_details"].append({
                 "companyRecordId": a,
+                "imageMatchCount": ir.get("total_image_matches", 0),
+                "similarImages": img_pairs,
             })
 
     results = []
     for c in companies:
         cid = c.companyRecordId
-        ev = company_evidence.get(cid, {"similar_ids": set(), "details": []})
-        similar_ids = list(ev["similar_ids"])
+        ev = company_evidence.get(cid, {"similar_ids": set(), "text_details": [], "image_details": []})
+        similar_ids = sorted(ev["similar_ids"])
 
         if similar_ids:
             similar_count = len(similar_ids)
+            evidence = {
+                "similarCompanyRecordIds": similar_ids,
+                "similarParagraphs": ev["text_details"],
+                "similarImages": ev["image_details"],
+            }
             results.append(CompanyResult(
                 companyRecordId=cid, registrationCompanyId=c.registrationCompanyId,
                 sectionId=c.sectionId, status="FAILED",
                 summary=f"{dim_label}与 {similar_count} 家公司雷同",
-                evidence={"detail": ev["details"], "similarCompanyRecordIds": similar_ids},
+                evidence=evidence,
             ))
         else:
             results.append(CompanyResult(
@@ -931,84 +955,95 @@ def _get_company_results_from_pipeline(
 
 
 # ============================================================
-# 主调度器
+# 同步调度器
 # ============================================================
 
-def _run_analysis(task_id: str):
-    """后台运行分析"""
-    record = task_manager.get_task(task_id)
-    if not record:
-        return
+def _dispatch_handler(
+    item_code: str,
+    companies: List[CompanyInfo],
+    pdf_paths: Dict[int, str],
+    batch_id: int,
+) -> List[CompanyResult]:
+    """根据 itemCode 路由到对应处理器
 
-    try:
-        task_manager.update_task(task_id, status="processing")
-        batch_id = record.batch_id
-        item_code = record.item_code
-        companies = record.companies
-
-        # 1. 下载 PDF
-        logger.info(f"[{task_id[:8]}] 下载 PDF (batch={batch_id}, {len(companies)} 个文件)")
-        pdf_paths = download_batch_pdfs(batch_id, companies)
-
-        # 2. 路由到对应 handler
-        if item_code == "FILE_CODE_SIMILAR":
-            results = handle_file_code_similar(companies, pdf_paths)
-        elif item_code == "EDITOR_SIGNER_SIMILAR":
-            results = handle_editor_signer_similar(companies, pdf_paths)
-        elif item_code == "DOC_AUTHOR_SIMILAR":
-            results = handle_doc_author_similar(companies, pdf_paths)
-        elif item_code == "BID_COMPANY_NAME_ABNORMAL":
-            results = handle_company_name_abnormal(companies, pdf_paths)
-        elif item_code == "SAME_BID_CONTACT_SIMILAR":
-            results = handle_same_bid_contact_similar(companies, pdf_paths)
-        elif item_code in HEAVY_ITEMS:
-            pipeline_result = _run_full_pipeline(
-                batch_id, companies, pdf_paths, item_code=item_code,
-            )
-            results = _get_company_results_from_pipeline(
-                companies, pipeline_result, item_code,
-            )
-        else:
-            raise ValueError(f"未知的 itemCode: {item_code}")
-
-        # 3. 构建响应
-        response = AnalyzeResponse(
-            batchId=batch_id,
-            itemCode=item_code,
-            itemName=ITEM_CODE_NAMES.get(item_code, item_code),
-            results=results,
+    轻量项（file_id/author/editor/contact/bidderName）：直接 fitz 提取，秒级返回
+    重量项（tech/commercial）：走完整管道 + ANALYSIS_DIMENSION 过滤
+    """
+    if item_code == "FILE_CODE_SIMILAR":
+        return handle_file_code_similar(companies, pdf_paths)
+    elif item_code == "EDITOR_SIGNER_SIMILAR":
+        return handle_editor_signer_similar(companies, pdf_paths)
+    elif item_code == "DOC_AUTHOR_SIMILAR":
+        return handle_doc_author_similar(companies, pdf_paths)
+    elif item_code == "SAME_BID_CONTACT_SIMILAR":
+        return handle_same_bid_contact_similar(companies, pdf_paths)
+    elif item_code == "SAME_bidderName_SIMILAR":
+        return handle_bidder_name_similar(companies, pdf_paths)
+    elif item_code in HEAVY_ITEMS:
+        pipeline_result = _run_full_pipeline(
+            batch_id, companies, pdf_paths, item_code=item_code,
         )
-
-        task_manager.update_task(
-            task_id, status="completed", result=response,
-            completed_at=datetime.now().isoformat(),
+        return _get_company_results_from_pipeline(
+            companies, pipeline_result, item_code,
         )
-        logger.info(f"[{task_id[:8]}] 完成 — {item_code}, "
-                    f"{sum(1 for r in results if r.status == 'FAILED')}/{len(results)} FAILED")
+    else:
+        raise ValueError(f"未知的 itemCode: {item_code}")
 
-    except Exception as e:
-        logger.exception(f"[{task_id[:8]}] 分析失败: {e}")
-        record = task_manager.get_task(task_id)
-        if record:
-            error_results = []
-            for c in record.companies:
-                error_results.append(CompanyResult(
-                    companyRecordId=c.companyRecordId,
-                    registrationCompanyId=c.registrationCompanyId,
-                    sectionId=c.sectionId, status="ERROR",
-                    summary=f"检查异常: {str(e)}",
-                    evidence={"error": str(e)},
-                ))
-            error_response = AnalyzeResponse(
-                batchId=record.batch_id,
-                itemCode=record.item_code,
-                itemName=ITEM_CODE_NAMES.get(record.item_code, record.item_code),
-                results=error_results,
-            )
-            task_manager.update_task(
-                task_id, status="failed", result=error_response,
-                error=str(e), completed_at=datetime.now().isoformat(),
-            )
+
+def _build_error_response(request: AnalyzeRequest, error_msg: str) -> AnalyzeResponse:
+    """构建错误响应（全公司 ERROR，不阻断后续检查项）"""
+    error_results = [
+        CompanyResult(
+            companyRecordId=c.companyRecordId,
+            registrationCompanyId=c.registrationCompanyId,
+            sectionId=c.sectionId,
+            status="ERROR",
+            summary=f"检查异常: {error_msg}",
+            evidence={"error": error_msg},
+        ) for c in request.companies
+    ]
+    return AnalyzeResponse(
+        batchId=request.batchId,
+        itemCode=request.itemCode,
+        itemName=ITEM_CODE_NAMES.get(request.itemCode, request.itemCode),
+        results=error_results,
+    )
+
+
+def _run_analysis_sync(request: AnalyzeRequest) -> AnalyzeResponse:
+    """同步执行单项检查（在 ThreadPoolExecutor 中运行）
+
+    1. 下载 PDF（按 batchId 缓存到本地）
+    2. 路由到对应 handler（轻量秒级 / 重量走完整管道）
+    3. 返回 AnalyzeResponse
+    """
+    batch_id = request.batchId
+    item_code = request.itemCode
+    companies = request.companies
+
+    t0 = time.time()
+    logger.info(f"[batch={batch_id}] 开始检查 {item_code} ({len(companies)} 家公司)")
+
+    # 1. 下载 PDF
+    pdf_paths = download_batch_pdfs(batch_id, companies)
+
+    # 2. 路由到对应 handler
+    results = _dispatch_handler(item_code, companies, pdf_paths, batch_id)
+
+    # 3. 构建响应
+    response = AnalyzeResponse(
+        batchId=batch_id,
+        itemCode=item_code,
+        itemName=ITEM_CODE_NAMES.get(item_code, item_code),
+        results=results,
+    )
+
+    elapsed = time.time() - t0
+    failed_count = sum(1 for r in results if r.status == "FAILED")
+    logger.info(f"[batch={batch_id}] 完成 — {item_code}, "
+                f"{failed_count}/{len(results)} FAILED, 耗时 {elapsed:.1f}s")
+
+    return response
 
 
 # ============================================================
@@ -1017,27 +1052,86 @@ def _run_analysis(task_id: str):
 
 app = FastAPI(
     title="围标串标检查 AI 服务",
-    description="为 Java 后端提供异步围标串标单项检查接口",
+    description="为 Java 后端提供同步围标串标单项检查接口",
     version="1.0.0",
 )
+
+# 同步执行器 + 超时控制
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+SYNC_TIMEOUT = 1800  # 30 分钟，覆盖 OCR+SBERT 重型场景
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analyze")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """启动时确保目录存在"""
+    """启动时确保目录存在 + 预加载模型"""
     os.makedirs(DOWNLOAD_BASE, exist_ok=True)
     os.makedirs(WORK_DIR, exist_ok=True)
     logger.info("围标串标 API 服务启动")
     logger.info(f"  PDF 下载目录: {DOWNLOAD_BASE}")
     logger.info(f"  管线工作目录: {WORK_DIR}")
 
+    # 预加载模型（避免首次请求卡住）
+    print("=" * 60)
+    print("正在预加载模型（首次启动需要 20-60 秒）...")
+    print("=" * 60)
+    logger.info("开始预加载模型...")
 
-@app.post("/api/v1/collusive-check/items/analyze", status_code=202)
-async def analyze_item(request: AnalyzeRequest):
-    """提交单项检查任务（异步）
+    # 1. SBERT 语义模型
+    print("\n[1/2] 加载 SBERT 语义模型...")
+    logger.info("[1/2] 加载 SBERT 语义模型（优先本地缓存）...")
+    try:
+        from sentence_transformers import SentenceTransformer
+        global _global_sbert_model
+        _global_sbert_model = SentenceTransformer(
+            'paraphrase-multilingual-MiniLM-L12-v2',
+            device='cpu', cache_folder='./models',
+            trust_remote_code=True, local_files_only=True,
+        )
+        print("  SBERT 加载完成")
+        logger.info("  SBERT 离线加载完成")
+    except Exception as e:
+        print(f"  SBERT 本地加载失败: {e}")
+        print("  SBERT 将在首次请求时按需加载")
+        logger.warning(f"  SBERT 本地加载失败: {e}")
+
+    # 2. OCR 引擎
+    print("\n[2/2] 加载 OCR 引擎...")
+    logger.info("[2/2] 加载 OCR 引擎...")
+    try:
+        from config import DetectionConfig
+        from image_analysis.image_ocr import ImageOCREngine
+        _cfg = DetectionConfig()
+        print(f"  正在初始化 {_cfg.OCR_ENGINE}...")
+        engine = ImageOCREngine(
+            use_gpu=_cfg.USE_GPU,
+            engine=_cfg.OCR_ENGINE,
+            offline=_cfg.OCR_OFFLINE_MODE,
+        )
+        ok = engine.is_available
+        print(f"  OCR ({_cfg.OCR_ENGINE}) {'加载完成' if ok else '不可用'}")
+        logger.info(f"  OCR ({_cfg.OCR_ENGINE}) {'加载完成' if ok else '不可用'}")
+    except Exception as e:
+        print(f"  OCR 加载异常: {e}")
+        logger.warning(f"  OCR 加载异常: {e}")
+
+    print("\n" + "=" * 60)
+    print("模型预加载完成，服务就绪")
+    print("=" * 60 + "\n")
+    logger.info("模型预加载完成，服务就绪")
+
+
+@app.post("/api/v1/collusive-check/items/analyze", status_code=200)
+async def analyze_item(request: AnalyzeRequest) -> AnalyzeResponse:
+    """同步单项检查
 
     Java 后端按 itemCode 顺序循环调用，每次只传一个检查项。
-    重量检查（文本/图片）同 batch 复用全量管线结果。
+    同步返回该 itemCode 下每家公司的检查结果。
+
+    轻量项（file_id/author/editor/contact/bidderName）秒级返回；
+    重量项（tech/commercial）走完整管道，最长 30 分钟。
+    单项失败或超时返回全公司 ERROR，不阻断后续检查项。
     """
     item_code = request.itemCode
     if item_code not in ITEM_CODE_NAMES:
@@ -1046,37 +1140,20 @@ async def analyze_item(request: AnalyzeRequest):
             detail=f"未知 itemCode: {item_code}，支持: {list(ITEM_CODE_NAMES.keys())}"
         )
 
-    if not request.companies or len(request.companies) < 1:
+    if not request.companies:
         raise HTTPException(status_code=400, detail="companies 不能为空")
     if len(request.companies) < 2 and item_code in HEAVY_ITEMS:
         raise HTTPException(status_code=400, detail="此检查项至少需要 2 家公司")
 
-    task_id = task_manager.create_task(
-        request.batchId, item_code, request.companies,
-    )
-
-    thread = threading.Thread(target=_run_analysis, args=(task_id,), daemon=True)
-    thread.start()
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "taskId": task_id,
-            "batchId": request.batchId,
-            "itemCode": item_code,
-            "status": "pending",
-            "message": f"检查任务已提交 ({ITEM_CODE_NAMES[item_code]})",
-        },
-    )
-
-
-@app.get("/api/v1/collusive-check/items/{task_id}")
-async def get_analyze_result(task_id: str):
-    """轮询检查结果"""
-    record = task_manager.get_task(task_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    return record.to_dict()
+    future = _executor.submit(_run_analysis_sync, request)
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=SYNC_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(f"[batch={request.batchId}] {item_code} 检测超时（{SYNC_TIMEOUT}s）")
+        return _build_error_response(request, f"检测超时（{SYNC_TIMEOUT}秒）")
+    except Exception as e:
+        logger.exception(f"[batch={request.batchId}] {item_code} 分析失败: {e}")
+        return _build_error_response(request, str(e))
 
 
 @app.get("/api/v1/collusive-check/health")
@@ -1085,10 +1162,7 @@ async def health():
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "active_tasks": sum(
-            1 for t in task_manager._tasks.values()
-            if t.status in ("pending", "processing")
-        ),
+        "supported_items": len(ITEM_CODE_NAMES),
     }
 
 
