@@ -184,6 +184,7 @@ def _collect_page_ocr_tasks(
     ocr_engine_type: str,
     use_gpu: bool,
     seen_hashes: set,
+    config: Optional[DetectionConfig] = None,
 ) -> List[tuple]:
     """收集当前页 OCR 图片任务。
 
@@ -194,9 +195,14 @@ def _collect_page_ocr_tasks(
     """
     tasks = []
     page_w, page_h = page.rect.width, page.rect.height
+    page_area = max(1.0, page_w * page_h)
     whole_image_bboxes = []
     small_fragment_bboxes = []
     small_png_fragments = 0
+    skipped_vector_regions = 0
+    vector_min_area_ratio = getattr(config, 'OCR_VECTOR_MIN_AREA_RATIO', 0.01)
+    vector_max_area_ratio = getattr(config, 'OCR_VECTOR_MAX_AREA_RATIO', 0.35)
+    vector_max_side_ratio = getattr(config, 'OCR_VECTOR_MAX_SIDE_RATIO', 0.85)
 
     image_list = page.get_images(full=True)
     seen_xrefs = set()
@@ -234,13 +240,13 @@ def _collect_page_ocr_tasks(
                 continue
 
             img_name = img_info[7] if len(img_info) > 7 else None
+            img_bbox = None
             if img_name:
                 try:
                     bbox_obj = page.get_image_bbox(img_name)
                     if bbox_obj:
-                        whole_image_bboxes.append(
-                            (bbox_obj.x0, bbox_obj.y0, bbox_obj.x1, bbox_obj.y1)
-                        )
+                        img_bbox = (bbox_obj.x0, bbox_obj.y0, bbox_obj.x1, bbox_obj.y1)
+                        whole_image_bboxes.append(img_bbox)
                 except Exception:
                     pass
 
@@ -277,6 +283,18 @@ def _collect_page_ocr_tasks(
             continue
         if any(_bbox_overlap_ratio(bbox, ib) > 0.5 for ib in whole_image_bboxes):
             continue
+        area_ratio = _bbox_area(bbox) / page_area
+        side_like_page = (
+            w / max(page_w, 1) >= vector_max_side_ratio
+            or h / max(page_h, 1) >= vector_max_side_ratio
+        )
+        if (
+            area_ratio < vector_min_area_ratio
+            or area_ratio > vector_max_area_ratio
+            or side_like_page
+        ):
+            skipped_vector_regions += 1
+            continue
         cluster_bboxes.append(bbox)
 
     for bbox in _merge_bboxes(cluster_bboxes, gap=12):
@@ -287,6 +305,19 @@ def _collect_page_ocr_tasks(
             x1 = min(page_w, x1 + 3)
             y1 = min(page_h, y1 + 3)
             if x1 - x0 < min_cluster_w or y1 - y0 < min_cluster_h:
+                continue
+            merged_bbox = (x0, y0, x1, y1)
+            mw, mh = x1 - x0, y1 - y0
+            merged_area_ratio = _bbox_area(merged_bbox) / page_area
+            merged_side_like_page = (
+                mw / max(page_w, 1) >= vector_max_side_ratio
+                or mh / max(page_h, 1) >= vector_max_side_ratio
+            )
+            if (
+                merged_area_ratio < vector_min_area_ratio
+                or merged_area_ratio > vector_max_area_ratio
+                or merged_side_like_page
+            ):
                 continue
             import fitz
             pix = page.get_pixmap(
@@ -304,7 +335,9 @@ def _collect_page_ocr_tasks(
     if tasks:
         logger.debug(
             f"OCR: 第 {page_num} 页收集 {len(tasks)} 张图 "
-            f"(跳过小PNG碎片 {small_png_fragments} 个, clusters={len(cluster_bboxes)})"
+            f"(跳过小PNG碎片 {small_png_fragments} 个, "
+            f"跳过矢量区域 {skipped_vector_regions} 个, "
+            f"clusters={len(cluster_bboxes)})"
         )
     return tasks
 
@@ -357,7 +390,7 @@ def _collect_page_ocr_tasks_from_file(args: tuple) -> list:
     """
     (
         file_path, page_num, min_img_size, min_conf,
-        ocr_engine_type, use_gpu,
+        ocr_engine_type, use_gpu, config,
     ) = args
     import fitz
 
@@ -366,7 +399,7 @@ def _collect_page_ocr_tasks_from_file(args: tuple) -> list:
         page = doc[page_num]
         return _collect_page_ocr_tasks(
             doc, page, page_num, min_img_size, min_conf,
-            ocr_engine_type, use_gpu, set(),
+            ocr_engine_type, use_gpu, set(), config,
         )
     finally:
         doc.close()
@@ -468,7 +501,7 @@ def ocr_pages(
                     _collect_page_ocr_tasks_from_file,
                     (
                         file_path, page_num, min_img_size, min_conf,
-                        ocr_engine_type, use_gpu,
+                        ocr_engine_type, use_gpu, config,
                     ),
                 )
                 for page_num in page_nums
@@ -493,7 +526,7 @@ def ocr_pages(
                     page = doc[page_num]
                     crop_tasks.extend(_collect_page_ocr_tasks(
                         doc, page, page_num, min_img_size, min_conf,
-                        ocr_engine_type, use_gpu, seen_hashes,
+                        ocr_engine_type, use_gpu, seen_hashes, config,
                     ))
 
                 except Exception as e:
@@ -517,7 +550,12 @@ def ocr_pages(
     if not crop_tasks:
         return 0
 
-    logger.info(f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别")
+    img_task_count = sum(1 for t in crop_tasks if str(t[1]).startswith('img:'))
+    vec_task_count = sum(1 for t in crop_tasks if str(t[1]).startswith('vec:'))
+    logger.info(
+        f"OCR: {os.path.basename(file_path)} — {len(crop_tasks)} 张图片待识别 "
+        f"(img={img_task_count}, vec={vec_task_count})"
+    )
 
     ocr_results = []
 

@@ -122,6 +122,9 @@ class DetectionConfig:
     OCR_MIN_CONFIDENCE: float = 0.3
     OCR_COLLECT_WORKERS: int = 2       # OCR 前的逐页图片/矢量区域收集并行度
     OCR_WORKERS: int = 1              # CPU 场景单进程 OCR，多进程争 CPU 反而慢
+    OCR_VECTOR_MIN_AREA_RATIO: float = 0.01
+    OCR_VECTOR_MAX_AREA_RATIO: float = 0.35
+    OCR_VECTOR_MAX_SIDE_RATIO: float = 0.85
     OCR_MODEL_DIR: Optional[str] = None
     OCR_OFFLINE_MODE: bool = False
     PADDLEOCR_HOME: Optional[str] = None
