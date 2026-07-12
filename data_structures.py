@@ -196,7 +196,8 @@ class ImageEvidence:
     matched_image_pairs: List[Dict] = field(default_factory=list)
     # [{source_a, source_b, phash_dist, dhash_dist, orb_match_ratio,
     #   histogram_correlation, confidence, reasons, thumbnail_base64_a,
-    #   thumbnail_base64_b, ocr_text_a, ocr_text_b}, ...]
+    #   thumbnail_base64_b, page_a, page_b, width_a, height_a,
+    #   width_b, height_b, ocr_text_a, ocr_text_b}, ...]
 
     # L2: 每对文字匹配详情
     matched_text_pairs: List[Dict] = field(default_factory=list)

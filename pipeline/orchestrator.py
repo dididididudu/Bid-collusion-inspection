@@ -1208,6 +1208,10 @@ class BidDetectionOrchestrator:
                 # 维度标签
                 'page_a': v.sig_a.page_num,
                 'page_b': v.sig_b.page_num,
+                'width_a': v.sig_a.width,
+                'height_a': v.sig_a.height,
+                'width_b': v.sig_b.width,
+                'height_b': v.sig_b.height,
                 '_dimension_tag': _get_image_dimension_tag(
                     v.sig_a.page_num, v.sig_b.page_num, doc_a, doc_b
                 ),

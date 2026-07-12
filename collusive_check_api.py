@@ -931,8 +931,20 @@ def _run_full_pipeline(
                 image_pair_summaries.append({
                     "source_a": img_pair.get("source_a", ""),
                     "source_b": img_pair.get("source_b", ""),
+                    "page_a": img_pair.get("page_a", -1),
+                    "page_b": img_pair.get("page_b", -1),
+                    "width_a": img_pair.get("width_a", 0),
+                    "height_a": img_pair.get("height_a", 0),
+                    "width_b": img_pair.get("width_b", 0),
+                    "height_b": img_pair.get("height_b", 0),
                     "confidence": round(img_pair.get("confidence", 0.0), 4),
+                    "phash_dist": img_pair.get("phash_dist", -1),
+                    "dhash_dist": img_pair.get("dhash_dist", -1),
+                    "orb_match_ratio": round(img_pair.get("orb_match_ratio", 0.0), 4),
+                    "histogram_correlation": round(img_pair.get("histogram_correlation", 0.0), 4),
                     "reasons": img_pair.get("reasons", []),
+                    "thumbnail_base64_a": img_pair.get("thumbnail_base64_a", ""),
+                    "thumbnail_base64_b": img_pair.get("thumbnail_base64_b", ""),
                     "ocr_text_a": (img_pair.get("ocr_text_a", "") or "")[:200],
                     "ocr_text_b": (img_pair.get("ocr_text_b", "") or "")[:200],
                 })
@@ -989,7 +1001,7 @@ def _get_company_results_from_pipeline(
 
     evidence 字段包含详细证据：
     - 文本相似: similarParagraphs（段落内容 + 相似度 + 公司ID）
-    - 图片相似: similarImages（图片引用 + 置信度 + 公司ID）
+    - 图片相似: similarImages（图片引用、页码、尺寸、缩略图 data URI、置信度 + 公司ID）
     """
     text_results = pipeline_result.get("text_results", {})
     image_results = pipeline_result.get("image_results", {})

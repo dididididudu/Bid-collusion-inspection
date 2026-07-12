@@ -145,6 +145,12 @@ def _build_image_evidence(doc_a, doc_b, cache, config=None, semantic_matcher=Non
             'l1_pass': v.l1_pass,
             'l2_pass': v.l2_pass,
             'l3_pass': v.l3_pass,
+            'page_a': v.sig_a.page_num,
+            'page_b': v.sig_b.page_num,
+            'width_a': v.sig_a.width,
+            'height_a': v.sig_a.height,
+            'width_b': v.sig_b.width,
+            'height_b': v.sig_b.height,
         })
     evidence.matched_text_pairs = match_result.text_matches
     evidence.ps_detail_list = match_result.ps_details
