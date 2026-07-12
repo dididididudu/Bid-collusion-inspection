@@ -276,7 +276,7 @@ class HealthTest(BaseTest):
         expected = {
             "FILE_CODE_SIMILAR", "EDITOR_SIGNER_SIMILAR", "DOC_AUTHOR_SIMILAR",
             "SAME_BID_CONTACT_SIMILAR", "SAME_bidderName_SIMILAR",
-            "TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL",
+            "TECH_BID_SIMILAR", "Business_BID_SIMILAR",
         }
         assert codes == expected, f"itemCode 不匹配\n期望: {expected}\n实际: {codes}"
 
@@ -387,7 +387,7 @@ class LightweightTest(BaseTest):
 # ============================================================
 
 class HeavyTest(BaseTest):
-    HEAVY_CODES = ["TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL"]
+    HEAVY_CODES = ["TECH_BID_SIMILAR", "Business_BID_SIMILAR"]
 
     def run_all(self):
         for code in self.HEAVY_CODES:

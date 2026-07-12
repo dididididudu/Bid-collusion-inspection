@@ -8,7 +8,7 @@
 
 1. **异步而非同步**：端点返回 `202 + taskId`，需客户端轮询 `GET /items/{taskId}`
 2. **itemCode 映射错误**：
-   - `BID_COMPANY_NAME_ABNORMAL` 被当作"公司名称异常"，但文档中它表示"商务标雷同"（重量维度）
+   - `Business_BID_SIMILAR` 被当作"公司名称异常"，但文档中它表示"商务标雷同"（重量维度）
    - 代码有 `COM_BID_SIMILAR`（商务标雷同），文档中无此项
    - 文档有 `SAME_bidderName_SIMILAR`（公司名雷同），代码缺失
 3. **缺少模型预加载**：首次请求时加载 SBERT/OCR 会阻塞数分钟
@@ -45,7 +45,7 @@ ITEM_CODE_NAMES: Dict[str, str] = {
     "SAME_BID_CONTACT_SIMILAR": "人名雷同",
     "SAME_bidderName_SIMILAR": "公司名雷同",      # 新增
     "TECH_BID_SIMILAR": "技术标雷同",
-    "BID_COMPANY_NAME_ABNORMAL": "商务标雷同",     # 改名（原"公司名称异常"）
+    "Business_BID_SIMILAR": "商务标雷同",     # 改名（原"公司名称异常"）
 }
 ```
 
@@ -56,7 +56,7 @@ LIGHTWEIGHT_ITEMS = {
     "SAME_BID_CONTACT_SIMILAR", "SAME_bidderName_SIMILAR",
 }
 TECH_BID_ITEMS = {"TECH_BID_SIMILAR"}
-COMMERCIAL_BID_ITEMS = {"BID_COMPANY_NAME_ABNORMAL"}   # 改名（原 COM_BID_ITEMS）
+COMMERCIAL_BID_ITEMS = {"Business_BID_SIMILAR"}   # 改名（原 COM_BID_ITEMS）
 HEAVY_ITEMS = TECH_BID_ITEMS | COMMERCIAL_BID_ITEMS
 ```
 

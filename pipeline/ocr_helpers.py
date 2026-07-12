@@ -350,6 +350,28 @@ def _ocr_crop_worker(args: tuple) -> Optional[tuple]:
     return (page_num, ocr_result)
 
 
+def _collect_page_ocr_tasks_from_file(args: tuple) -> list:
+    """并行收集单页 OCR 任务。
+
+    每个线程独立打开 PDF，避免共享 PyMuPDF document/page 对象。
+    """
+    (
+        file_path, page_num, min_img_size, min_conf,
+        ocr_engine_type, use_gpu,
+    ) = args
+    import fitz
+
+    doc = fitz.open(file_path)
+    try:
+        page = doc[page_num]
+        return _collect_page_ocr_tasks(
+            doc, page, page_num, min_img_size, min_conf,
+            ocr_engine_type, use_gpu, set(),
+        )
+    finally:
+        doc.close()
+
+
 def ocr_pages(
     file_path: str,
     doc_id: str,
@@ -422,34 +444,75 @@ def ocr_pages(
     min_img_size = getattr(config, 'IMAGE_MIN_SIZE', 50)
     sample_step = config.OCR_SAMPLE_STEP
 
-    try:
-        doc = fitz.open(file_path)
-    except Exception as e:
-        logger.error(f"OCR: 无法打开 PDF ({file_path}): {e}")
-        return 0
-
     # 先收集所有需要 OCR 的图片：
     # 完整嵌入图直接读取原图，矢量/碎片图只渲染合并后的区域。
     crop_tasks = []
     ocr_engine_type = getattr(config, 'OCR_ENGINE', 'easyocr')
     use_gpu = getattr(config, 'USE_GPU', False)
-    # 方案7：已见过的图片哈希去重，相同 pHash 只 OCR 一次
-    seen_hashes = set()
-    try:
-        for page_num in range(0, page_count, sample_step):
-            try:
-                page = doc[page_num]
-                crop_tasks.extend(_collect_page_ocr_tasks(
-                    doc, page, page_num, min_img_size, min_conf,
-                    ocr_engine_type, use_gpu, seen_hashes,
-                ))
+    page_nums = list(range(0, page_count, sample_step))
+    collect_workers = min(
+        max(1, getattr(config, 'OCR_COLLECT_WORKERS', 1)),
+        len(page_nums) or 1,
+        os.cpu_count() or 4,
+    )
 
-            except Exception as e:
-                logger.debug(f"OCR: 第 {page_num} 页失败 ({os.path.basename(file_path)}): {e}")
+    if collect_workers > 1:
+        logger.info(
+            f"OCR: 页级任务收集并行 {collect_workers} workers, "
+            f"{len(page_nums)} 页"
+        )
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=collect_workers) as executor:
+            futures = [
+                executor.submit(
+                    _collect_page_ocr_tasks_from_file,
+                    (
+                        file_path, page_num, min_img_size, min_conf,
+                        ocr_engine_type, use_gpu,
+                    ),
+                )
+                for page_num in page_nums
+            ]
+            for future in as_completed(futures):
+                try:
+                    crop_tasks.extend(future.result())
+                except Exception as e:
+                    logger.debug(f"OCR: 页级任务收集失败 ({os.path.basename(file_path)}): {e}")
+    else:
+        try:
+            doc = fitz.open(file_path)
+        except Exception as e:
+            logger.error(f"OCR: 无法打开 PDF ({file_path}): {e}")
+            return 0
+
+        # 已见过的图片哈希去重，相同 pHash 只 OCR 一次。
+        seen_hashes = set()
+        try:
+            for page_num in page_nums:
+                try:
+                    page = doc[page_num]
+                    crop_tasks.extend(_collect_page_ocr_tasks(
+                        doc, page, page_num, min_img_size, min_conf,
+                        ocr_engine_type, use_gpu, seen_hashes,
+                    ))
+
+                except Exception as e:
+                    logger.debug(f"OCR: 第 {page_num} 页失败 ({os.path.basename(file_path)}): {e}")
+                    continue
+
+        finally:
+            doc.close()
+
+    if crop_tasks:
+        deduped_tasks = []
+        seen_hashes = set()
+        for task in crop_tasks:
+            phash = task[1]
+            if phash in seen_hashes:
                 continue
-
-    finally:
-        doc.close()
+            seen_hashes.add(phash)
+            deduped_tasks.append(task)
+        crop_tasks = deduped_tasks
 
     if not crop_tasks:
         return 0

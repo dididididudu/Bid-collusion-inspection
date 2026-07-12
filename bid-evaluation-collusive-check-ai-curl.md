@@ -261,7 +261,7 @@ py/AI 返回当前检查项下每家公司的检查结论。
 }
 ```
 
-#### 技术标/商务标雷同（TECH_BID_SIMILAR / BID_COMPANY_NAME_ABNORMAL）
+#### 技术标/商务标雷同（TECH_BID_SIMILAR / Business_BID_SIMILAR）
 
 ```json
 {

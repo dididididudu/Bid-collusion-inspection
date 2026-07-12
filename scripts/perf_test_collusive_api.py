@@ -83,7 +83,7 @@ def main():
     parser.add_argument(
         "--heavy",
         action="store_true",
-        help="Test heavy text+image/OCR items: TECH_BID_SIMILAR and BID_COMPANY_NAME_ABNORMAL",
+        help="Test heavy text+image/OCR items: TECH_BID_SIMILAR and Business_BID_SIMILAR",
     )
     parser.add_argument(
         "--items",
@@ -94,7 +94,7 @@ def main():
     args = parser.parse_args()
     if args.items is None:
         args.items = (
-            ["TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL"]
+            ["TECH_BID_SIMILAR", "Business_BID_SIMILAR"]
             if args.heavy
             else ["FILE_CODE_SIMILAR", "DOC_AUTHOR_SIMILAR", "EDITOR_SIGNER_SIMILAR"]
         )

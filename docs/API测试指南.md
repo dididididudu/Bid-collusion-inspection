@@ -38,7 +38,7 @@ curl -s http://118.178.240.30:8001/api/v1/collusive-check/item-codes | python3 -
         {"code": "FILE_CODE_SIMILAR", "name": "文件码雷同"},
         {"code": "EDITOR_SIGNER_SIMILAR", "name": "编辑经办人雷同"},
         {"code": "DOC_AUTHOR_SIMILAR", "name": "文档作者雷同"},
-        {"code": "BID_COMPANY_NAME_ABNORMAL", "name": "投标文件公司名称异常"},
+        {"code": "Business_BID_SIMILAR", "name": "投标文件公司名称异常"},
         {"code": "SAME_BID_CONTACT_SIMILAR", "name": "同标段单位联系人雷同"},
         {"code": "TECH_BID_SIMILAR", "name": "技术标雷同"},
         {"code": "COM_BID_SIMILAR", "name": "商务标雷同"}
@@ -159,7 +159,7 @@ curl -s -X POST http://118.178.240.30:8001/api/v1/collusive-check/items/analyze 
   -d '{
     "batchId": 100,
     "projectId": 10001,
-    "itemCode": "BID_COMPANY_NAME_ABNORMAL",
+    "itemCode": "Business_BID_SIMILAR",
     "companies": [
       {"companyRecordId": 501, "registrationCompanyId": 1, "sectionId": 1,
        "bidderName": "公司A", "bidFileUrl": "http://placeholder/a.pdf"},

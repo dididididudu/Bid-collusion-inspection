@@ -168,91 +168,119 @@ class PyMuPDFExtractor(BasePDFExtractor):
             # 按 chunk_size 分批处理页面
             for chunk_start in range(start_page, page_count, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, page_count)
-                chunk_index = chunk_start // chunk_size
-
-                logger.debug(
-                    f"提取块 {chunk_index}: 页 {chunk_start}-{chunk_end-1} "
-                    f"({file_path})"
-                )
-
-                # 提取该块的文本。保留页文本，避免后续分段时重复 get_text()。
-                page_texts = []
-                for page_num in range(chunk_start, chunk_end):
-                    try:
-                        page = doc[page_num]
-                        text = page.get_text("text")
-                        if text:
-                            page_texts.append((page_num, text))
-                    except Exception as e:
-                        logger.warning(
-                            f"页面 {page_num} 提取失败 ({file_path}): {e}"
-                        )
-                        continue
-
-                chunk_text = "\n".join(text for _page_num, text in page_texts)
-
-                # 按页分段 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
-                # 与旧版不同：逐页分段，记录每段的页码
-                paragraphs = []
-                paragraph_hashes = []
-                paragraph_page_nums = []
-                paragraph_tokens = []
-                chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
-
-                for page_num, page_text in page_texts:
-                    page_paragraphs = self._split_paragraphs(page_text)
-                    for para in page_paragraphs:
-                        para_words = [
-                            w for w in jieba.cut(para)
-                            if w not in self.stopwords and len(w) > 1
-                        ]
-                        paragraphs.append(para)
-                        paragraph_page_nums.append(page_num)
-                        paragraph_tokens.append(para_words)
-                        chunk_tokens.extend(para_words)
-
-                # 计算 SimHash
-                simhash = self._compute_simhash_from_tokens(chunk_tokens) if chunk_tokens else ""
-
-                # 预计算唯一词 MinHash 值（跨段落共享缓存）
-                word_hash_cache = {}
-                if chunk_tokens:
-                    for w in set(chunk_tokens):
-                        word_hash_cache[w] = [
-                            hash_func(w) for hash_func in self._minhash_funcs
-                        ]
-
-                for para_words in paragraph_tokens:
-                    para_hash = self._compute_minhash_cached(para_words, word_hash_cache)
-                    paragraph_hashes.append(para_hash)
-
-                # 提取报价
-                quotes = self._extract_quotes(chunk_text)
-
-                # 提取嵌入图片哈希（logo/印章/图表，用于图片比对）
-                # _extract_embedded_images 内部已优化：纯文本页通过 get_image_info 预检跳过
-                embedded_hashes = self._extract_embedded_images(
-                    doc, chunk_start, chunk_end
-                )
-                all_image_hashes = list(set(embedded_hashes))
-
-                yield ChunkResult(
-                    doc_id=doc_id,
-                    chunk_index=chunk_index,
-                    start_page=chunk_start,
-                    end_page=chunk_end - 1,
-                    text=chunk_text,
-                    paragraphs=paragraphs,
-                    paragraph_hashes=paragraph_hashes,
-                    paragraph_tokens=paragraph_tokens,
-                    paragraph_page_nums=paragraph_page_nums,
-                    simhash=simhash,
-                    quotes=quotes,
-                    image_hashes=all_image_hashes,
+                yield self._extract_chunk_from_doc(
+                    doc, file_path, doc_id, chunk_size, chunk_start, chunk_end
                 )
 
         finally:
             doc.close()
+
+    def extract_chunk_range(
+        self,
+        file_path: str,
+        chunk_size: int,
+        chunk_start: int,
+        chunk_end: int,
+    ) -> ChunkResult:
+        """提取单个 chunk。
+
+        该方法会独立打开 PDF，供单文件内部 chunk 级并行使用，避免多个线程共享
+        同一个 PyMuPDF document 对象。
+        """
+        doc_id = self._generate_doc_id(file_path)
+        doc = fitz.open(file_path)
+        try:
+            return self._extract_chunk_from_doc(
+                doc, file_path, doc_id, chunk_size, chunk_start, chunk_end
+            )
+        finally:
+            doc.close()
+
+    def _extract_chunk_from_doc(
+        self,
+        doc,
+        file_path: str,
+        doc_id: str,
+        chunk_size: int,
+        chunk_start: int,
+        chunk_end: int,
+    ) -> ChunkResult:
+        chunk_index = chunk_start // chunk_size
+
+        logger.debug(
+            f"提取块 {chunk_index}: 页 {chunk_start}-{chunk_end-1} "
+            f"({file_path})"
+        )
+
+        # 提取该块的文本。保留页文本，避免后续分段时重复 get_text()。
+        page_texts = []
+        for page_num in range(chunk_start, chunk_end):
+            try:
+                page = doc[page_num]
+                text = page.get_text("text")
+                if text:
+                    page_texts.append((page_num, text))
+            except Exception as e:
+                logger.warning(f"页面 {page_num} 提取失败 ({file_path}): {e}")
+                continue
+
+        chunk_text = "\n".join(text for _page_num, text in page_texts)
+
+        # 按页分段 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
+        # 与旧版不同：逐页分段，记录每段的页码。
+        paragraphs = []
+        paragraph_hashes = []
+        paragraph_page_nums = []
+        paragraph_tokens = []
+        chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
+
+        for page_num, page_text in page_texts:
+            page_paragraphs = self._split_paragraphs(page_text)
+            for para in page_paragraphs:
+                para_words = [
+                    w for w in jieba.cut(para)
+                    if w not in self.stopwords and len(w) > 1
+                ]
+                paragraphs.append(para)
+                paragraph_page_nums.append(page_num)
+                paragraph_tokens.append(para_words)
+                chunk_tokens.extend(para_words)
+
+        simhash = self._compute_simhash_from_tokens(chunk_tokens) if chunk_tokens else ""
+
+        # 预计算唯一词 MinHash 值（跨段落共享缓存）
+        word_hash_cache = {}
+        if chunk_tokens:
+            for w in set(chunk_tokens):
+                word_hash_cache[w] = [
+                    hash_func(w) for hash_func in self._minhash_funcs
+                ]
+
+        for para_words in paragraph_tokens:
+            para_hash = self._compute_minhash_cached(para_words, word_hash_cache)
+            paragraph_hashes.append(para_hash)
+
+        quotes = self._extract_quotes(chunk_text)
+
+        # 提取嵌入图片哈希（logo/印章/图表，用于图片比对）。
+        # 这里只渲染矢量/碎片合并区域，不做整页渲染。
+        embedded_hashes = self._extract_embedded_images(doc, chunk_start, chunk_end)
+        all_image_hashes = list(set(embedded_hashes))
+
+        return ChunkResult(
+            doc_id=doc_id,
+            chunk_index=chunk_index,
+            start_page=chunk_start,
+            end_page=chunk_end - 1,
+            text=chunk_text,
+            paragraphs=paragraphs,
+            paragraph_hashes=paragraph_hashes,
+            paragraph_tokens=paragraph_tokens,
+            paragraph_page_nums=paragraph_page_nums,
+            simhash=simhash,
+            quotes=quotes,
+            image_hashes=all_image_hashes,
+        )
 
     # ============================================================
     # 图片提取方法

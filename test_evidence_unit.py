@@ -235,9 +235,9 @@ def test_success_empty_evidence():
 
 
 def test_commercial_bid_evidence():
-    """验证 BID_COMPANY_NAME_ABNORMAL (商务标) evidence 结构"""
+    """验证 Business_BID_SIMILAR (商务标) evidence 结构"""
     print("\n" + "=" * 70, flush=True)
-    print("[单元测试] BID_COMPANY_NAME_ABNORMAL evidence 结构验证", flush=True)
+    print("[单元测试] Business_BID_SIMILAR evidence 结构验证", flush=True)
     print("=" * 70, flush=True)
 
     companies = [
@@ -252,7 +252,7 @@ def test_commercial_bid_evidence():
     ]
 
     mock_result = make_mock_pipeline_result("commercial")
-    results = _get_company_results_from_pipeline(companies, mock_result, "BID_COMPANY_NAME_ABNORMAL")
+    results = _get_company_results_from_pipeline(companies, mock_result, "Business_BID_SIMILAR")
 
     for r in results:
         print(f"  公司 {r.companyRecordId}: status={r.status}", flush=True)
@@ -263,12 +263,12 @@ def test_commercial_bid_evidence():
         assert "similarImages" in ev
         print(f"    ✓ 商务标 evidence 结构正确: {list(ev.keys())}", flush=True)
 
-    print(f"\n✓ BID_COMPANY_NAME_ABNORMAL evidence 验证通过 (2/2 FAILED)", flush=True)
+    print(f"\n✓ Business_BID_SIMILAR evidence 验证通过 (2/2 FAILED)", flush=True)
 
 
 if __name__ == "__main__":
     print("=" * 70, flush=True)
-    print("TECH_BID_SIMILAR / BID_COMPANY_NAME_ABNORMAL evidence 单元测试", flush=True)
+    print("TECH_BID_SIMILAR / Business_BID_SIMILAR evidence 单元测试", flush=True)
     print("=" * 70, flush=True)
 
     all_pass = True

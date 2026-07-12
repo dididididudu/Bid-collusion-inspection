@@ -238,9 +238,35 @@ def extract_single_worker(args: tuple) -> dict:
                 cache.delete_document_chunks(doc_id)
                 start_page = 0
 
-        chunks = list(
-            extractor.extract_chunks(file_path, config.CHUNK_PAGE_SIZE, start_page)
+        chunk_size = config.CHUNK_PAGE_SIZE
+        chunk_ranges = [
+            (chunk_start, min(chunk_start + chunk_size, page_count))
+            for chunk_start in range(start_page, page_count, chunk_size)
+        ]
+        chunk_workers = min(
+            max(1, getattr(config, 'PDF_CHUNK_WORKERS', 1)),
+            len(chunk_ranges) or 1,
         )
+        if chunk_workers > 1:
+            logger.info(
+                f"[Worker] chunk 并行: {filename}, "
+                f"chunks={len(chunk_ranges)}, workers={chunk_workers}"
+            )
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            chunks = []
+            with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
+                futures = [
+                    executor.submit(
+                        extractor.extract_chunk_range,
+                        file_path, chunk_size, chunk_start, chunk_end,
+                    )
+                    for chunk_start, chunk_end in chunk_ranges
+                ]
+                for future in as_completed(futures):
+                    chunks.append(future.result())
+            chunks.sort(key=lambda c: c.chunk_index)
+        else:
+            chunks = list(extractor.extract_chunks(file_path, chunk_size, start_page))
 
         # 只把 SQLite 写入放进事务。不要在 PDF 提取期间持有写锁，
         # 否则多进程 Phase 1 会被数据库锁串行化。

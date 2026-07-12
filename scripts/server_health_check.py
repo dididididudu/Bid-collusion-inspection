@@ -49,7 +49,7 @@ ITEM_CODES = {
     "SAME_BID_CONTACT_SIMILAR": "人名雷同",
     "SAME_bidderName_SIMILAR": "公司名雷同",
     "TECH_BID_SIMILAR": "技术标雷同",
-    "BID_COMPANY_NAME_ABNORMAL": "商务标雷同",
+    "Business_BID_SIMILAR": "商务标雷同",
 }
 
 LIGHTWEIGHT_ITEMS = {
@@ -58,7 +58,7 @@ LIGHTWEIGHT_ITEMS = {
 }
 
 HEAVY_ITEMS = {
-    "TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL",
+    "TECH_BID_SIMILAR", "Business_BID_SIMILAR",
 }
 
 DEFAULT_API_URL = "http://localhost:8001"
@@ -334,7 +334,7 @@ class ServerTester:
                     ("DOC_AUTHOR_SIMILAR", "文档作者雷同"),
                     ("EDITOR_SIGNER_SIMILAR", "编辑经办人雷同"),
                     ("FILE_CODE_SIMILAR", "文件码雷同"),
-                    ("BID_COMPANY_NAME_ABNORMAL", "投标文件公司名称异常"),
+                    ("Business_BID_SIMILAR", "投标文件公司名称异常"),
                     ("SAME_BID_CONTACT_SIMILAR", "同标段单位联系人雷同"),
                 ]
                 for item_code, item_name in test_items:
@@ -365,7 +365,7 @@ class ServerTester:
                 shutil.copy2(str(pdf_path), str(dest_dir / f"{companies_heavy[-1]['companyRecordId']}_{sanitized_name}.pdf"))
 
             for item_code, item_name in [("TECH_BID_SIMILAR", "技术标雷同"),
-                                         ("BID_COMPANY_NAME_ABNORMAL", "商务标雷同")]:
+                                         ("Business_BID_SIMILAR", "商务标雷同")]:
                 ok(f"{item_name}（重量级，首次运行耗时较长）")
                 result = self.test_analyze(item_name, item_code, companies_heavy, batch_id=batch_id)
                 if result["passed"]:

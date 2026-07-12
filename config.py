@@ -67,6 +67,7 @@ class DetectionConfig:
 
     # ── 流式 / 存储 ──
     CHUNK_PAGE_SIZE: int = 50
+    PDF_CHUNK_WORKERS: int = 2       # 单个大 PDF 内部按 chunk 并行提取，提升少文件场景 CPU 利用率
     MAX_CHUNKS_IN_MEMORY: int = 5
     PDF_EXTRACTOR_BACKEND: str = "pymupdf"
     MAX_MEMORY_MB: int = 2048
@@ -119,6 +120,7 @@ class DetectionConfig:
     OCR_LANGUAGES: list = None
     OCR_SAMPLE_STEP: int = 1          # 必须=1，隔页采样会遗漏图片证据
     OCR_MIN_CONFIDENCE: float = 0.3
+    OCR_COLLECT_WORKERS: int = 2       # OCR 前的逐页图片/矢量区域收集并行度
     OCR_WORKERS: int = 1              # CPU 场景单进程 OCR，多进程争 CPU 反而慢
     OCR_MODEL_DIR: Optional[str] = None
     OCR_OFFLINE_MODE: bool = False
@@ -181,9 +183,15 @@ class DetectionConfig:
         if self.PHASE3_WORKERS > _cpu:
             self.PHASE3_WORKERS = max(1, _cpu // 2)
             logger.info(f"PHASE3_WORKERS 修正为 {self.PHASE3_WORKERS} (CPU={_cpu})")
+        if self.PDF_CHUNK_WORKERS < 1 or self.PDF_CHUNK_WORKERS > _cpu:
+            self.PDF_CHUNK_WORKERS = max(1, min(_cpu, 4))
+            logger.info(f"PDF_CHUNK_WORKERS 修正为 {self.PDF_CHUNK_WORKERS}")
         if self.OCR_WORKERS < 1 or self.OCR_WORKERS > _cpu:
             self.OCR_WORKERS = max(1, min(_cpu, 4))
             logger.info(f"OCR_WORKERS 修正为 {self.OCR_WORKERS}")
+        if self.OCR_COLLECT_WORKERS < 1 or self.OCR_COLLECT_WORKERS > _cpu:
+            self.OCR_COLLECT_WORKERS = max(1, min(_cpu, 4))
+            logger.info(f"OCR_COLLECT_WORKERS 修正为 {self.OCR_COLLECT_WORKERS}")
 
     def _auto_detect_device(self):
         try:
@@ -218,6 +226,11 @@ class DetectionConfig:
         if env_ocr_workers.isdigit():
             self.OCR_WORKERS = int(env_ocr_workers)
             logger.info(f"OCR_WORKERS 从环境变量加载: {self.OCR_WORKERS}")
+
+        env_ocr_collect_workers = os.environ.get('OCR_COLLECT_WORKERS', '')
+        if env_ocr_collect_workers.isdigit():
+            self.OCR_COLLECT_WORKERS = int(env_ocr_collect_workers)
+            logger.info(f"OCR_COLLECT_WORKERS 从环境变量加载: {self.OCR_COLLECT_WORKERS}")
         
         env_ocr_batch_size = os.environ.get('OCR_BATCH_SIZE', '')
         if env_ocr_batch_size.isdigit():
@@ -233,6 +246,11 @@ class DetectionConfig:
         if env_phase3.isdigit():
             self.PHASE3_WORKERS = int(env_phase3)
             logger.info(f"PHASE3_WORKERS 从环境变量加载: {self.PHASE3_WORKERS}")
+
+        env_pdf_chunk_workers = os.environ.get('PDF_CHUNK_WORKERS', '')
+        if env_pdf_chunk_workers.isdigit():
+            self.PDF_CHUNK_WORKERS = int(env_pdf_chunk_workers)
+            logger.info(f"PDF_CHUNK_WORKERS 从环境变量加载: {self.PDF_CHUNK_WORKERS}")
 
         env_phase3_pool = os.environ.get('PHASE3_USE_PROCESS_POOL', '').lower()
         if env_phase3_pool in ('true', '1', 'yes'):

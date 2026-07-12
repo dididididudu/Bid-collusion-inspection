@@ -17,33 +17,35 @@ PASS_CNT = defaultdict(int)
 # PDF 生成工具
 # ================================================================
 def _make_pdf(path, pages, meta=None):
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm, cm
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak
-    for n, f in [('YaHei','msyh.ttc'),('YaHei-Bold','msyhbd.ttc')]:
-        p = os.path.join('C:/Windows/Fonts', f)
-        try: pdfmetrics.registerFont(TTFont(n, p))
-        except: pass
-    doc = SimpleDocTemplate(path, pagesize=A4, topMargin=2*cm, bottomMargin=2*cm)
-    ns = ParagraphStyle('N', fontName='YaHei', fontSize=10, leading=18, spaceAfter=4*mm)
-    hs = ParagraphStyle('H', fontName='YaHei-Bold', fontSize=14, spaceBefore=6*mm, spaceAfter=3*mm)
-    story = []
-    for i, txt in enumerate(pages):
-        if i: story.append(PageBreak())
-        for line in txt.strip().split('\n'):
-            line = line.strip()
-            if not line: continue
-            story.append(Paragraph(line[2:], hs) if line.startswith('# ') else Paragraph(line, ns))
-    doc.build(story)
+    import fitz
+
+    doc = fitz.open()
+    for txt in pages:
+        page = doc.new_page(width=595, height=842)  # A4 points
+        y = 72
+        for raw_line in txt.strip().split('\n'):
+            line = raw_line.strip()
+            if not line:
+                y += 12
+                continue
+            is_heading = line.startswith('# ')
+            if is_heading:
+                line = line[2:]
+            font_size = 14 if is_heading else 10
+            for start in range(0, len(line), 42):
+                page.insert_text(
+                    (72, y), line[start:start + 42],
+                    fontsize=font_size,
+                    fontname="china-s",
+                )
+                y += 22 if is_heading else 16
+                if y > 780:
+                    page = doc.new_page(width=595, height=842)
+                    y = 72
     if meta:
-        import fitz
-        d = fitz.open(path)
-        d.set_metadata({k:v for k,v in meta.items() if v})
-        d.save(path, incremental=True, encryption=0)
-        d.close()
+        doc.set_metadata({k: v for k, v in meta.items() if v})
+    doc.save(path)
+    doc.close()
 
 def make_pdf_3page(path, company, contact, cv, author='', creator='', producer=''):
     intro = cv.get('intro','公司简介。')

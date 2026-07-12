@@ -105,7 +105,10 @@ class BidDetectionOrchestrator:
         # 打印关键配置摘要
         cfg = self.config
         dims_on = [k for k, v in cfg.ENABLED_DIMENSIONS.items() if v]
-        logger.info(f"配置: workers(P1={cfg.PHASE1_WORKERS}, P3={cfg.PHASE3_WORKERS}), "
+        logger.info(f"配置: workers(P1={cfg.PHASE1_WORKERS}, P3={cfg.PHASE3_WORKERS}, "
+                    f"PDF_CHUNK={getattr(cfg, 'PDF_CHUNK_WORKERS', 1)}, "
+                    f"OCR_COLLECT={getattr(cfg, 'OCR_COLLECT_WORKERS', 1)}, "
+                    f"OCR={cfg.OCR_WORKERS}), "
                     f"GPU={cfg.SBERT_DEVICE}, OCR={cfg.OCR_ENGINE}, "
                     f"阈值(LSH={cfg.MINHASH_LSH_THRESHOLD}, Jaccard={cfg.MINHASH_JACCARD_THRESHOLD}), "
                     f"启用的维度: {dims_on}")
@@ -300,9 +303,7 @@ class BidDetectionOrchestrator:
                         total_pending,
                         (os.cpu_count() or 4) * 2,
                     )
-                    if total_pending <= 3:
-                        num_workers = 1
-                    elif total_pending <= 20:
+                    if total_pending <= 20:
                         num_workers = min(num_workers, 4)
                     else:
                         num_workers = min(num_workers, 8)

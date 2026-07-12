@@ -78,7 +78,7 @@ ITEM_CODE_NAMES: Dict[str, str] = {
     "SAME_BID_CONTACT_SIMILAR": "人名雷同",
     "SAME_bidderName_SIMILAR": "公司名雷同",
     "TECH_BID_SIMILAR": "技术标雷同",
-    "BID_COMPANY_NAME_ABNORMAL": "商务标雷同",
+    "Business_BID_SIMILAR": "商务标雷同",
 }
 
 # 轻量检查（无需全量管线，秒级返回）
@@ -89,7 +89,7 @@ LIGHTWEIGHT_ITEMS = {
 
 # 重量检查（技术标 + 商务标，各包含文本+图片，需走完整管道）
 TECH_BID_ITEMS = {"TECH_BID_SIMILAR"}
-COMMERCIAL_BID_ITEMS = {"BID_COMPANY_NAME_ABNORMAL"}
+COMMERCIAL_BID_ITEMS = {"Business_BID_SIMILAR"}
 HEAVY_ITEMS = TECH_BID_ITEMS | COMMERCIAL_BID_ITEMS
 
 # ============================================================
@@ -182,21 +182,16 @@ def download_batch_pdfs(batch_id: int, companies: List[CompanyInfo]) -> Dict[int
     batch_dir = os.path.join(DOWNLOAD_BASE, str(batch_id))
     os.makedirs(batch_dir, exist_ok=True)
 
-    result = {}
-    errors = []
-
-    for company in companies:
+    def _download_one(company: CompanyInfo):
         record_id = company.companyRecordId
         filename = f"{record_id}_{_sanitize_filename(company.bidderName)}.pdf"
         local_path = os.path.join(batch_dir, filename)
 
         # 如果已存在且文件有效，跳过下载
         if os.path.exists(local_path) and os.path.getsize(local_path) > 100:
-            result[record_id] = local_path
-            continue
+            return record_id, local_path, None
 
         # 下载（带重试）
-        downloaded = False
         for attempt in range(1, DOWNLOAD_RETRIES + 1):
             try:
                 logger.info(f"下载 PDF [batch={batch_id}, company={company.bidderName}] "
@@ -223,10 +218,8 @@ def download_batch_pdfs(batch_id: int, companies: List[CompanyInfo]) -> Dict[int
                     f.write(resp.content)
 
                 if len(resp.content) > 100:
-                    result[record_id] = local_path
                     logger.info(f"  ✅ 下载完成: {local_path} ({len(resp.content) / 1024:.0f}KB)")
-                    downloaded = True
-                    break
+                    return record_id, local_path, None
                 else:
                     logger.warning(f"  文件过小 ({len(resp.content)} bytes)，重试...")
 
@@ -244,10 +237,8 @@ def download_batch_pdfs(batch_id: int, companies: List[CompanyInfo]) -> Dict[int
                     with open(local_path, "wb") as f:
                         f.write(resp.content)
                     if len(resp.content) > 100:
-                        result[record_id] = local_path
                         logger.info(f"  ✅ 下载完成（跳过 SSL）")
-                        downloaded = True
-                        break
+                        return record_id, local_path, None
                 except Exception as e2:
                     logger.warning(f"  SSL 跳过后仍失败: {e2}")
             except requests.exceptions.RequestException as e:
@@ -256,10 +247,26 @@ def download_batch_pdfs(batch_id: int, companies: List[CompanyInfo]) -> Dict[int
             if attempt < DOWNLOAD_RETRIES:
                 time.sleep(2 * attempt)
 
-        if not downloaded:
-            err_msg = f"公司 {company.bidderName}({record_id}) PDF 下载失败"
-            errors.append(err_msg)
-            logger.error(err_msg)
+        err_msg = f"公司 {company.bidderName}({record_id}) PDF 下载失败"
+        logger.error(err_msg)
+        return record_id, "", err_msg
+
+    result = {}
+    errors = []
+    download_workers = min(
+        max(1, int(os.environ.get("PDF_DOWNLOAD_WORKERS", "4"))),
+        len(companies),
+    )
+    logger.info(f"[batch={batch_id}] PDF 下载并发: workers={download_workers}, files={len(companies)}")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=download_workers) as executor:
+        futures = [executor.submit(_download_one, company) for company in companies]
+        for future in as_completed(futures):
+            record_id, local_path, err = future.result()
+            if err:
+                errors.append(err)
+            elif local_path:
+                result[record_id] = local_path
 
     if not result:
         raise RuntimeError(f"所有 PDF 下载失败: {'; '.join(errors)}")
@@ -809,7 +816,7 @@ def _run_full_pipeline(
         }
     """
     dimension = "technical" if item_code in TECH_BID_ITEMS else "commercial"
-    # BID_COMPANY_NAME_ABNORMAL → commercial; TECH_BID_SIMILAR → technical
+    # Business_BID_SIMILAR → commercial; TECH_BID_SIMILAR → technical
     cache_key = f"{batch_id}_{dimension}"
 
     cached = batch_cache.get(cache_key)
@@ -976,7 +983,7 @@ def _get_company_results_from_pipeline(
     直接用 text_results / image_results 的总体匹配判定 FAILED/SUCCESS。
 
     TECH_BID_SIMILAR:           technical 维度
-    BID_COMPANY_NAME_ABNORMAL:  commercial 维度
+    Business_BID_SIMILAR:  commercial 维度
 
     evidence 字段包含详细证据：
     - 文本相似: similarParagraphs（段落内容 + 相似度 + 公司ID）
@@ -1166,7 +1173,13 @@ app = FastAPI(
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 SYNC_TIMEOUT = 1800  # 30 分钟，覆盖 OCR+SBERT 重型场景
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analyze")
+ANALYZE_EXECUTOR_WORKERS = max(
+    1, int(os.environ.get("ANALYZE_EXECUTOR_WORKERS", "4"))
+)
+_executor = ThreadPoolExecutor(
+    max_workers=ANALYZE_EXECUTOR_WORKERS,
+    thread_name_prefix="analyze",
+)
 
 
 @app.on_event("startup")
@@ -1177,6 +1190,7 @@ async def startup_event():
     logger.info("围标串标 API 服务启动")
     logger.info(f"  PDF 下载目录: {DOWNLOAD_BASE}")
     logger.info(f"  管线工作目录: {WORK_DIR}")
+    logger.info(f"  API 分析线程: {ANALYZE_EXECUTOR_WORKERS}")
 
     # 预加载模型（避免首次请求卡住）
     print("=" * 60)
