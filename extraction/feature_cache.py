@@ -32,7 +32,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 9  # v9: minhash BLOB + text_hash 全局 embedding 缓存
+    SCHEMA_VERSION = 10  # v10: persist page_classifications for tech/commercial filtering
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -136,6 +136,9 @@ class DocumentCache:
             # v9 迁移：MinHash 二进制列 + 全局文本嵌入缓存
             if current_version < 9:
                 self._migrate_v9(cursor)
+            # v10 迁移：保存技术标/商务标页分类
+            if current_version < 10:
+                self._migrate_v10(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -278,6 +281,17 @@ class DocumentCache:
         )
         logger.info("v9 模式迁移完成：MinHash BLOB + 文本嵌入缓存")
 
+    def _migrate_v10(self, cursor):
+        """v10 迁移：documents 新增 page_classifications_json 列"""
+        try:
+            cursor.execute(
+                "ALTER TABLE documents "
+                "ADD COLUMN page_classifications_json TEXT DEFAULT '{}'"
+            )
+            logger.info("v10 模式迁移完成：documents 新增 page_classifications_json 列")
+        except Exception:
+            pass
+
     def _create_tables(self, cursor):
         """创建所有表"""
         # 文档注册表
@@ -302,6 +316,7 @@ class DocumentCache:
                 image_hash_count INTEGER DEFAULT 0,
                 chunk_count INTEGER DEFAULT 0,
                 extracted_at TEXT DEFAULT (datetime('now')),
+                page_classifications_json TEXT DEFAULT '{}',
                 processed INTEGER DEFAULT 0
             )
         """)
@@ -464,8 +479,8 @@ class DocumentCache:
                     quote_values_json, quote_tail_dist_json,
                     quote_count, quote_integer_ratio, quote_mean, quote_std,
                     image_hashes_json, image_hash_count,
-                    chunk_count, extracted_at, processed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    chunk_count, extracted_at, page_classifications_json, processed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 doc.doc_id,
                 doc.filename,
@@ -486,13 +501,14 @@ class DocumentCache:
                 len(doc.image_hashes),
                 doc.chunk_count,
                 doc.extracted_at,
+                json.dumps(getattr(doc, 'page_classifications', {}) or {}, ensure_ascii=False),
                 1  # processed = True
             ))
 
     def load_document(self, doc_id: str) -> Optional[BidFeature]:
         """加载单个文档特征"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
+        cursor.execute(f"{self._document_select_sql()} WHERE doc_id = ?", (doc_id,))
         row = cursor.fetchone()
         if row is None:
             return None
@@ -501,11 +517,25 @@ class DocumentCache:
     def load_all_documents(self) -> List[BidFeature]:
         """加载所有已处理文档的特征（轻量级，不含文本内容）"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM documents")
+        cursor.execute(self._document_select_sql())
         docs = []
         for row in cursor.fetchall():
             docs.append(self._row_to_bid_feature(row))
         return docs
+
+    @staticmethod
+    def _document_select_sql() -> str:
+        """显式列顺序，避免 SQLite 迁移后 SELECT * 列顺序不一致。"""
+        return """
+            SELECT
+                doc_id, filename, file_size, page_count, total_text_length,
+                is_scanned, doc_simhash, doc_minhash,
+                metadata_json, quote_values_json, quote_tail_dist_json,
+                quote_count, quote_integer_ratio, quote_mean, quote_std,
+                image_hashes_json, image_hash_count, chunk_count, extracted_at,
+                page_classifications_json, processed
+            FROM documents
+        """
 
     def get_unprocessed_docs(self) -> List[str]:
         """获取尚未提取特征的文档路径列表（用于 Phase 1 恢复）"""
@@ -534,7 +564,8 @@ class DocumentCache:
             'is_scanned', 'doc_simhash', 'doc_minhash',
             'metadata_json', 'quote_values_json', 'quote_tail_dist_json',
             'quote_count', 'quote_integer_ratio', 'quote_mean', 'quote_std',
-            'image_hashes_json', 'image_hash_count', 'chunk_count', 'extracted_at', 'processed'
+            'image_hashes_json', 'image_hash_count', 'chunk_count', 'extracted_at',
+            'page_classifications_json', 'processed'
         ]
         data = dict(zip(columns, row))
 
@@ -567,6 +598,16 @@ class DocumentCache:
             except (json.JSONDecodeError, TypeError):
                 doc_minhash = None
 
+        raw_page_classifications = json.loads(
+            data.get('page_classifications_json') or '{}'
+        )
+        page_classifications = {}
+        for page_num, label in raw_page_classifications.items():
+            try:
+                page_classifications[int(page_num)] = label
+            except (TypeError, ValueError):
+                continue
+
         return BidFeature(
             doc_id=data['doc_id'],
             filename=data['filename'],
@@ -585,6 +626,7 @@ class DocumentCache:
             page_count=data['page_count'] or 0,
             doc_minhash=doc_minhash,
             chunk_count=data['chunk_count'] or 0,
+            page_classifications=page_classifications,
         )
 
     # ================================================================

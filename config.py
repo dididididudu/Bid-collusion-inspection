@@ -129,6 +129,7 @@ class DetectionConfig:
     # ── 技术标/商务标维度过滤（管线仅处理指定维度）──
     # "all" = 全部页面, "technical" = 仅技术标页, "commercial" = 仅商务标页
     ANALYSIS_DIMENSION: str = "all"
+    DIMENSION_STRICT_FILTER: bool = True  # True=分类失败不混用全文，保证技术/商务接口互不污染
 
     # ── 图片 ──
     IMAGE_MIN_SIZE: int = 50
@@ -240,7 +241,7 @@ class DetectionConfig:
         elif env_phase3_pool in ('false', '0', 'no'):
             self.PHASE3_USE_PROCESS_POOL = False
             logger.info("PHASE3_USE_PROCESS_POOL 从环境变量加载: False")
-        
+
         if self.PADDLEOCR_HOME is None:
             env_home = os.environ.get('PADDLEOCR_HOME', '')
             if env_home:

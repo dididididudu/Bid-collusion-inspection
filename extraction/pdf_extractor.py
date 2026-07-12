@@ -175,21 +175,21 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     f"({file_path})"
                 )
 
-                # 提取该块的文本
-                all_text_parts = []
+                # 提取该块的文本。保留页文本，避免后续分段时重复 get_text()。
+                page_texts = []
                 for page_num in range(chunk_start, chunk_end):
                     try:
                         page = doc[page_num]
                         text = page.get_text("text")
                         if text:
-                            all_text_parts.append(text)
+                            page_texts.append((page_num, text))
                     except Exception as e:
                         logger.warning(
                             f"页面 {page_num} 提取失败 ({file_path}): {e}"
                         )
                         continue
 
-                chunk_text = "\n".join(all_text_parts)
+                chunk_text = "\n".join(text for _page_num, text in page_texts)
 
                 # 按页分段 + 分词（段落级分词同时供 MinHash 和 chunk 聚合复用）
                 # 与旧版不同：逐页分段，记录每段的页码
@@ -199,14 +199,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 paragraph_tokens = []
                 chunk_tokens = []  # 从段落聚合，消除 chunk+段落双重 jieba
 
-                for page_num in range(chunk_start, chunk_end):
-                    try:
-                        page = doc[page_num]
-                        page_text = page.get_text("text")
-                    except Exception:
-                        continue
-                    if not page_text:
-                        continue
+                for page_num, page_text in page_texts:
                     page_paragraphs = self._split_paragraphs(page_text)
                     for para in page_paragraphs:
                         para_words = [
@@ -361,6 +354,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 rendered_regions = []  # 已渲染的区域，避免重复
 
                 # === 策略1: cluster_drawings 检测矢量绘图集群 ===
+                # 只渲染检测到的矢量/碎片合并区域，不做整页渲染。
                 try:
                     clusters = page.cluster_drawings(
                         x_tolerance=10, y_tolerance=10, final_filter=False
@@ -465,7 +459,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                             continue
 
                 # === 策略4: 对所有嵌入图片补充原始字节哈希 ===
-                # 确保相同图片无论渲染位置是否相同，都有一致的原始字节哈希
+                # 确保相同图片无论渲染位置是否相同，都有一致的原始字节哈希。
                 try:
                     for img_info in page.get_images(full=True):
                         try:
@@ -497,49 +491,6 @@ class PyMuPDFExtractor(BasePDFExtractor):
                 continue
 
         return hashes
-
-    def extract_all_page_hashes(
-        self, file_path: str, sample_step: int = 2
-    ) -> List[str]:
-        """提取整个文档所有页面的图片哈希（用于扫描版 PDF）
-
-        独立方法，在 Phase 1 中专门调用。返回完整的页面哈希列表。
-        用于后续文档间页级相似度比对。
-
-        Args:
-            file_path: PDF 文件路径
-            sample_step: 采样步长（每隔 N 页取 1 页）
-
-        Returns:
-            ["page_0:p{hash1}", "page_0:d{hash1}", "page_2:p{hash2}", ...]
-        """
-        doc = fitz.open(file_path)
-        try:
-            all_hashes = []
-            for page_num in range(0, doc.page_count, sample_step):
-                try:
-                    page = doc[page_num]
-                    pix = page.get_pixmap(dpi=120)
-                    if pix is None:
-                        continue
-
-                    img_data = pix.tobytes("rgb") if pix.n >= 3 else pix.tobytes("gray")
-                    mode = "RGB" if pix.n >= 3 else "L"
-                    img = Image.frombytes(mode, (pix.width, pix.height), img_data)
-                    img.thumbnail((256, 256), Image.LANCZOS)
-
-                    phash = imagehash.phash(img)
-                    dhash = imagehash.dhash(img)
-                    all_hashes.append(f"page_{page_num}:p{phash}")
-                    all_hashes.append(f"page_{page_num}:d{dhash}")
-
-                except Exception as e:
-                    logger.debug(f"页面 {page_num} 渲染失败: {e}")
-                    continue
-
-            return all_hashes
-        finally:
-            doc.close()
 
     # ============================================================
     # 文本处理 (复用原有逻辑，独立于 extractor.py)

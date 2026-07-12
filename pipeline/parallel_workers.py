@@ -220,7 +220,7 @@ def extract_single_worker(args: tuple) -> dict:
                     from pipeline.ocr_helpers import ocr_pages as _ocr_pages
                     _ocr_pages(
                         file_path, doc_id, page_count, cache,
-                        config, ocr_engine, force=False,
+                        config, ocr_engine,
                         ocr_workers=config.OCR_WORKERS,
                         gpu_manager=gpu_manager_client if use_gpu_mgr else None,
                     )
@@ -238,12 +238,16 @@ def extract_single_worker(args: tuple) -> dict:
                 cache.delete_document_chunks(doc_id)
                 start_page = 0
 
-        chunks = []
+        chunks = list(
+            extractor.extract_chunks(file_path, config.CHUNK_PAGE_SIZE, start_page)
+        )
+
+        # 只把 SQLite 写入放进事务。不要在 PDF 提取期间持有写锁，
+        # 否则多进程 Phase 1 会被数据库锁串行化。
         _begin_immediate_with_retry(cache.conn, max_retries=10)
         try:
-            for chunk_result in extractor.extract_chunks(file_path, config.CHUNK_PAGE_SIZE, start_page):
+            for chunk_result in chunks:
                 cache.store_chunk(chunk_result, conn=cache.conn)
-                chunks.append(chunk_result)
             cache.conn.execute("COMMIT")
         except Exception:
             cache.conn.execute("ROLLBACK")
@@ -273,14 +277,14 @@ def extract_single_worker(args: tuple) -> dict:
                 from pipeline.ocr_helpers import ocr_pages as _ocr_pages
                 _ocr_pages(
                     file_path, doc_id, page_count, cache,
-                    config, ocr_engine, force=False,
+                    config, ocr_engine,
                     ocr_workers=config.OCR_WORKERS,
                 )
             elif use_gpu_mgr:
                 from pipeline.ocr_helpers import ocr_pages as _ocr_pages
                 _ocr_pages(
                     file_path, doc_id, page_count, cache,
-                    config, ocr_engine, force=False,
+                    config, ocr_engine,
                     ocr_workers=config.OCR_WORKERS,
                     gpu_manager=gpu_manager_client,
                 )

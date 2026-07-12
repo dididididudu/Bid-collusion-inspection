@@ -39,7 +39,7 @@ from image_analysis.image_matcher import ImageMatcher
 from scoring import RiskScoringEngine
 from report import ReportGenerator
 from pipeline.evidence_builder import (
-    build_metadata_evidence, build_image_evidence, build_text_evidence,
+    build_metadata_evidence, build_text_evidence,
     build_contact_evidence, _get_image_dimension_tag,
 )
 from pipeline.ocr_helpers import ocr_pages, aggregate_ocr_paragraphs
@@ -182,9 +182,7 @@ class BidDetectionOrchestrator:
                         len(unprocessed),
                         os.cpu_count() or 4,
                     )
-                    if len(unprocessed) <= 5:
-                        num_workers = 1
-                    elif len(unprocessed) <= 20:
+                    if len(unprocessed) <= 20:
                         num_workers = min(num_workers, 4)
                     else:
                         num_workers = min(num_workers, 8)
@@ -612,7 +610,6 @@ class BidDetectionOrchestrator:
 
     def _phase1_ocr_pages(
         self, file_path: str, doc_id: str, page_count: int,
-        force: bool = False,
     ) -> int:
         """OCR 提取嵌入图片文字 — 统一委托给 ocr_helpers.ocr_pages
 
@@ -625,73 +622,9 @@ class BidDetectionOrchestrator:
         return ocr_pages(
             file_path, doc_id, page_count,
             self.cache, self.config, self.ocr_engine,
-            force=force, ocr_workers=self.config.OCR_WORKERS,
+            ocr_workers=self.config.OCR_WORKERS,
             gpu_manager=self.gpu_manager.client,
         )
-
-    def _aggregate_ocr_to_paragraphs(self, doc_id: str, page_count: int) -> int:
-        import jieba
-        from data_structures import ChunkResult
-
-        ocr_results = self.cache.load_image_ocr_results(doc_id)
-        if not ocr_results:
-            return 0
-
-        ocr_sorted = sorted(ocr_results, key=lambda r: r.get('page_num', 0))
-        all_text = "\n".join(
-            r['ocr_text'] for r in ocr_sorted
-            if r.get('ocr_text', '').strip()
-        )
-        if not all_text.strip():
-            return 0
-
-        paragraphs = self.extractor._split_paragraphs(all_text)
-        if not paragraphs:
-            return 0
-
-        stopwords = self.extractor.stopwords
-        all_tokens = [w for w in jieba.cut(all_text) if w not in stopwords and len(w) > 1]
-        word_hash_cache = {}
-        unique_words = set(all_tokens)
-        for w in unique_words:
-            word_hash_cache[w] = [hf(w) for hf in self.extractor._minhash_funcs]
-
-        paragraph_hashes = []
-        for para in paragraphs:
-            para_words = [w for w in jieba.cut(para) if w not in stopwords and len(w) > 1]
-            para_hash = self.extractor._compute_minhash_cached(para_words, word_hash_cache)
-            paragraph_hashes.append(para_hash)
-
-        simhash = (
-            self.extractor._compute_simhash_from_tokens(all_tokens)
-            if all_tokens else "0" * 16
-        )
-        quotes = self.extractor._extract_quotes(all_text)
-
-        chunk_result = ChunkResult(
-            doc_id=doc_id,
-            chunk_index=self.OCR_CHUNK_INDEX,
-            start_page=0,
-            end_page=page_count - 1 if page_count > 0 else 0,
-            text=all_text,
-            paragraphs=paragraphs,
-            paragraph_hashes=paragraph_hashes,
-            paragraph_page_nums=[-1] * len(paragraphs),
-            simhash=simhash,
-            quotes=quotes,
-            image_hashes=[],
-        )
-        self.cache.store_chunk(chunk_result)
-
-        feature = self.cache.load_document(doc_id)
-        if feature:
-            doc_minhash = self.text_processor._aggregate_minhash(paragraph_hashes)
-            feature.text_length = len(all_text)
-            feature.text_simhash = simhash
-            feature.doc_minhash = doc_minhash
-            feature.chunk_count = 1
-            self.cache.store_document(feature)
-        return len(paragraphs)
 
     def _phase_toc_parse(self, state) -> None:
         """Phase 1.2: TOC 解析 — 识别技术标/商务标分界
@@ -731,15 +664,29 @@ class BidDetectionOrchestrator:
                 )
                 result = parser.parse()
 
-                if result['page_classifications']:
+                classifications = result.get('page_classifications') or {}
+                meaningful_count = sum(
+                    1 for label in classifications.values()
+                    if label in ("technical", "commercial")
+                )
+
+                if classifications:
                     feat.page_classifications = result['page_classifications']
-                    parsed_count += 1
                     self.cache.store_document(feat)
-                    logger.info(
-                        f"  [{feat.filename}] method={result.get('method','?')}, "
-                        f"tech_start={result.get('tech_start_page', -1)}, "
-                        f"classified={len(result['page_classifications'])} pages"
-                    )
+                    if meaningful_count:
+                        parsed_count += 1
+                        logger.info(
+                            f"  [{feat.filename}] method={result.get('method','?')}, "
+                            f"confidence={result.get('confidence', 0):.2f}, "
+                            f"tech_start={result.get('tech_start_page', -1)}, "
+                            f"commercial_start={result.get('com_start_page', -1)}, "
+                            f"classified={meaningful_count}/{len(classifications)} pages"
+                        )
+                    else:
+                        logger.warning(
+                            f"  [{feat.filename}] 未识别到技术/商务边界，"
+                            f"method={result.get('method','?')}, pages={len(classifications)}"
+                        )
                 else:
                     logger.debug(f"  [{feat.filename}] 未检测到技术标分界")
 
@@ -805,11 +752,19 @@ class BidDetectionOrchestrator:
                 if dimension in ("technical", "commercial"):
                     para_full = self.cache.load_all_paragraphs_full(doc_feat.doc_id)
                     pages = getattr(doc_feat, 'page_classifications', {}) or {}
-                    paragraphs = {}
-                    for idx, info in sorted(para_full.items()):
-                        page_num = info.get('page_num', -1)
-                        if pages.get(page_num, 'unknown') == dimension:
-                            paragraphs[idx] = info.get('text', '')
+                    has_target_pages = any(label == dimension for label in pages.values())
+                    if pages and has_target_pages:
+                        paragraphs = {}
+                        for idx, info in sorted(para_full.items()):
+                            page_num = info.get('page_num', -1)
+                            if pages.get(page_num, 'unknown') == dimension:
+                                paragraphs[idx] = info.get('text', '')
+                    else:
+                        logger.error(
+                            f"Phase 1.5: {doc_feat.filename} 未识别到 {dimension} 页面，"
+                            "严格模式下不混用全文"
+                        )
+                        paragraphs = {}
                 else:
                     paragraphs = {
                         idx: text
@@ -1005,6 +960,12 @@ class BidDetectionOrchestrator:
         if dimension not in ("technical", "commercial"):
             return para_full
         pages = getattr(doc, 'page_classifications', {}) or {}
+        if not pages:
+            logger.error(f"{doc.filename} 缺少页分类，{dimension} 维度严格过滤为空")
+            return {}
+        if not any(label == dimension for label in pages.values()):
+            logger.error(f"{doc.filename} 未识别到 {dimension} 页面，严格过滤为空")
+            return {}
         return {
             idx: info for idx, info in para_full.items()
             if pages.get(info.get('page_num', -1), 'unknown') == dimension
@@ -1020,7 +981,11 @@ class BidDetectionOrchestrator:
             return hashes
         pages = getattr(doc, 'page_classifications', {}) or {}
         if not pages:
-            return hashes
+            logger.error(f"{doc.filename} 缺少页分类，{dimension} 图片维度严格过滤为空")
+            return []
+        if not any(label == dimension for label in pages.values()):
+            logger.error(f"{doc.filename} 未识别到 {dimension} 页面，图片维度严格过滤为空")
+            return []
         filtered = []
         for h in (hashes or []):
             if h.startswith('page_'):

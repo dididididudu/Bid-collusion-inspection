@@ -70,6 +70,7 @@ class BidFeature:
     page_count: int = 0  # PDF 总页数
     doc_minhash: Optional[List[int]] = None  # 聚合所有段落的 MinHash 签名（128 维）
     chunk_count: int = 0  # 文本块数量
+    page_classifications: Dict[int, str] = field(default_factory=dict)  # 页码 -> technical/commercial/unknown
 
 
 # ============================================================
