@@ -101,7 +101,7 @@ curl -X POST "http://python-service/api/v1/collusive-check/items/analyze" \
 | 内容检测 | 同标段雷同性 | `SAME_BID_CONTACT_SIMILAR` | 人名雷同 |
 | 内容检测 | 同标段雷同性 | `SAME_bidderName_SIMILAR` | 公司名雷同 |
 | 内容检测 | 技术标 | `TECH_BID_SIMILAR` | 技术标雷同 |
-| 内容检测 | 商务标 | `BID_COMPANY_NAME_ABNORMAL` | 商务标雷同 |
+| 内容检测 | 商务标 | `Business_BID_SIMILAR` | 商务标雷同 |
 
 ## 6. companies 参数说明
 

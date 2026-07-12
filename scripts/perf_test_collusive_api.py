@@ -81,12 +81,23 @@ def main():
     parser.add_argument("--port", type=int, default=18081, help="Temporary file server port")
     parser.add_argument("--batch-id", type=int, default=int(time.time()), help="Batch id for API cache reuse")
     parser.add_argument(
+        "--heavy",
+        action="store_true",
+        help="Test heavy text+image/OCR items: TECH_BID_SIMILAR and BID_COMPANY_NAME_ABNORMAL",
+    )
+    parser.add_argument(
         "--items",
         nargs="+",
-        default=["TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL"],
+        default=None,
         help="Item codes to test in order",
     )
     args = parser.parse_args()
+    if args.items is None:
+        args.items = (
+            ["TECH_BID_SIMILAR", "BID_COMPANY_NAME_ABNORMAL"]
+            if args.heavy
+            else ["FILE_CODE_SIMILAR", "DOC_AUTHOR_SIMILAR", "EDITOR_SIGNER_SIMILAR"]
+        )
 
     pdf_dir = Path(args.pdf_dir).resolve()
     if not pdf_dir.is_dir():
@@ -100,7 +111,7 @@ def main():
     print(f"API: {args.api}")
     print(f"batchId: {args.batch_id}")
     print(f"companies: {len(companies)}")
-    print("Tip: set COLLUSIVE_ENABLE_IMAGE_ANALYSIS=1 and COLLUSIVE_ENABLE_OCR=1 to include image/OCR cost.")
+    print("Tip: use --heavy to test text+image/OCR heavy items.")
 
     timings = {}
     try:

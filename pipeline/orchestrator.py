@@ -549,6 +549,8 @@ class BidDetectionOrchestrator:
             existing_doc = self.cache.load_document(doc_id)
             if existing_doc and existing_doc.doc_minhash:
                 logger.info(f"文档已完全提取: {filename}")
+                if self.config.ENABLE_OCR:
+                    self._phase1_ocr_pages(file_path, doc_id, page_count)
                 try:
                     fp = extract_contacts_from_sqlite(doc_id, self.cache)
                     self.cache.store_contact_fingerprint(doc_id, fp.to_json())

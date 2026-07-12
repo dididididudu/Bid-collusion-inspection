@@ -209,6 +209,21 @@ def extract_single_worker(args: tuple) -> dict:
             existing_doc = cache.load_document(doc_id)
             if existing_doc and existing_doc.doc_minhash:
                 logger.info(f"[Worker] 已完全提取: {filename}")
+                if config.ENABLE_OCR:
+                    if ocr_engine is None and not use_gpu_mgr:
+                        from image_analysis.image_ocr import ImageOCREngine
+                        ocr_engine = ImageOCREngine(
+                            use_gpu=config.USE_GPU, engine=config.OCR_ENGINE,
+                            model_dir=config.OCR_MODEL_DIR, offline=config.OCR_OFFLINE_MODE,
+                            retry_count=config.OCR_RETRY_COUNT,
+                        )
+                    from pipeline.ocr_helpers import ocr_pages as _ocr_pages
+                    _ocr_pages(
+                        file_path, doc_id, page_count, cache,
+                        config, ocr_engine, force=False,
+                        ocr_workers=config.OCR_WORKERS,
+                        gpu_manager=gpu_manager_client if use_gpu_mgr else None,
+                    )
                 try:
                     fp = extract_contacts_from_sqlite(doc_id, cache)
                     cache.store_contact_fingerprint(doc_id, fp.to_json())

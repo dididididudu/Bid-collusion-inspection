@@ -366,6 +366,109 @@ def _get_pdf_page_count(pdf_path: str) -> int:
         return 0
 
 
+def _get_batch_work_dirs(batch_id: int, dimension: str = "") -> Dict[str, str]:
+    """返回同 batch 共享的工作目录。
+
+    cache/input/output 按 batch 共享，checkpoint 按任务维度隔离，避免技术标
+    和商务标的 Phase 3 进度互相覆盖。
+    """
+    stable_workdir = os.environ.get("COLLUSIVE_STABLE_WORKDIR", "1").lower() in ("1", "true", "yes")
+    suffix = "" if stable_workdir else f"_{uuid.uuid4().hex[:8]}"
+    work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}{suffix}")
+    ckpt_name = f"checkpoints_{dimension or 'text'}"
+    return {
+        "work_dir": work_dir,
+        "input_dir": os.path.join(work_dir, "input"),
+        "output_dir": os.path.join(work_dir, "output"),
+        "cache_dir": os.path.join(work_dir, "cache"),
+        "ckpt_dir": os.path.join(work_dir, ckpt_name),
+    }
+
+
+def _copy_batch_inputs(
+    batch_id: int,
+    companies: List[CompanyInfo],
+    pdf_paths: Dict[int, str],
+    input_dir: str,
+) -> Dict[int, str]:
+    """复制 batch PDF 到稳定 input 目录，返回 companyRecordId -> doc_id。"""
+    os.makedirs(input_dir, exist_ok=True)
+    doc_id_map = {}
+    for c in companies:
+        src = pdf_paths.get(c.companyRecordId)
+        if src and os.path.exists(src):
+            safe_name = f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf"
+            dst = os.path.join(input_dir, safe_name)
+            if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(src):
+                shutil.copy2(src, dst)
+            doc_id_map[c.companyRecordId] = hashlib.md5(dst.encode('utf-8')).hexdigest()[:16]
+    return doc_id_map
+
+
+def _build_pipeline_config(cache_dir: str, ckpt_dir: str, dimension: str = "all"):
+    from config import DetectionConfig
+
+    config = DetectionConfig()
+    config.CACHE_DIR = cache_dir
+    config.CHECKPOINT_DIR = ckpt_dir
+    config.TEXT_EMBEDDING_CACHE_DIR = os.environ.get(
+        "TEXT_EMBEDDING_CACHE_DIR",
+        os.path.join(WORK_DIR, "shared_embedding_cache"),
+    )
+    config.ENABLE_OCR = os.environ.get("COLLUSIVE_ENABLE_OCR", "1").lower() in ("1", "true", "yes")
+    config.ENABLE_IMAGE_ANALYSIS = os.environ.get("COLLUSIVE_ENABLE_IMAGE_ANALYSIS", "1").lower() in ("1", "true", "yes")
+    config.OCR_ENGINE = "paddleocr"
+    config.USE_GPU = os.environ.get("USE_GPU", str(config.USE_GPU)).lower() in ("1", "true", "yes")
+    env_sbert_device = os.environ.get("SBERT_DEVICE", config.SBERT_DEVICE).lower()
+    if env_sbert_device in ("cpu", "cuda", "mps", "auto"):
+        config.SBERT_DEVICE = env_sbert_device
+    config.SBERT_BATCH_SIZE = int(os.environ.get("SBERT_BATCH_SIZE", config.SBERT_BATCH_SIZE))
+    config.PHASE1_WORKERS = int(os.environ.get("PHASE1_WORKERS", config.PHASE1_WORKERS))
+    config.PHASE3_WORKERS = int(os.environ.get("PHASE3_WORKERS", config.PHASE3_WORKERS))
+    config.TOC_FILTER_ENABLED = True
+    config.ANALYSIS_DIMENSION = dimension
+    return config
+
+
+def _warm_text_cache(
+    batch_id: int,
+    companies: List[CompanyInfo],
+    pdf_paths: Dict[int, str],
+) -> Dict[int, str]:
+    """为联系人/公司名等内容轻量项预热 batch 级文本缓存。
+
+    只执行 Phase 0/1 文本提取并写入 SQLite，不跑 OCR/SBERT/Phase 3。
+    """
+    from pipeline.orchestrator import BidDetectionOrchestrator
+
+    dirs = _get_batch_work_dirs(batch_id, "text")
+    os.makedirs(dirs["output_dir"], exist_ok=True)
+    doc_id_map = _copy_batch_inputs(batch_id, companies, pdf_paths, dirs["input_dir"])
+
+    config = _build_pipeline_config(dirs["cache_dir"], dirs["ckpt_dir"], "all")
+    config.ENABLE_OCR = False
+    config.ENABLE_IMAGE_ANALYSIS = False
+    config.ENABLE_CHECKPOINT = False
+    config.ENABLED_DIMENSIONS['content_similarity'] = False
+
+    orchestrator = BidDetectionOrchestrator(config)
+    try:
+        file_paths = [
+            os.path.join(dirs["input_dir"], f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf")
+            for c in companies
+            if c.companyRecordId in doc_id_map
+        ]
+        orchestrator._phase0_metadata(file_paths)
+        for file_path in file_paths:
+            orchestrator._phase1_extract_single(file_path)
+        orchestrator.cache.conn.commit()
+        logger.info(f"[batch={batch_id}] 文本缓存预热完成: {len(file_paths)} 个文件")
+    finally:
+        orchestrator.streaming.clear()
+        orchestrator.cache.close()
+    return doc_id_map
+
+
 def handle_file_code_similar(
     companies: List[CompanyInfo],
     pdf_paths: Dict[int, str],
@@ -492,20 +595,36 @@ def handle_doc_author_similar(
 def handle_bidder_name_similar(
     companies: List[CompanyInfo],
     pdf_paths: Dict[int, str],
+    batch_id: int = 0,
 ) -> List[CompanyResult]:
     """公司名雷同检测 — 本公司文件中出现其他投标公司名称
 
     对应 itemCode: SAME_bidderName_SIMILAR
     """
-    from extraction.contact_extractor import extract_contacts_from_text
+    from extraction.contact_extractor import extract_contacts_from_sqlite, extract_contacts_from_text
+    from extraction.feature_cache import DocumentCache
 
     company_name_in_docs: Dict[int, List[str]] = {}
-    for c in companies:
-        path = pdf_paths.get(c.companyRecordId)
-        if path and os.path.exists(path):
-            text = _extract_text_preview(path)
-            ci = extract_contacts_from_text(text)
-            company_name_in_docs[c.companyRecordId] = ci.company_names
+    doc_id_map = _warm_text_cache(batch_id, companies, pdf_paths) if batch_id else {}
+    cache = None
+    if doc_id_map:
+        dirs = _get_batch_work_dirs(batch_id, "text")
+        cache = DocumentCache(dirs["cache_dir"])
+    try:
+        for c in companies:
+            doc_id = doc_id_map.get(c.companyRecordId)
+            if cache is not None and doc_id:
+                ci = extract_contacts_from_sqlite(doc_id, cache)
+                company_name_in_docs[c.companyRecordId] = ci.company_names
+                continue
+            path = pdf_paths.get(c.companyRecordId)
+            if path and os.path.exists(path):
+                text = _extract_text_preview(path)
+                ci = extract_contacts_from_text(text)
+                company_name_in_docs[c.companyRecordId] = ci.company_names
+    finally:
+        if cache is not None:
+            cache.close()
 
     bidder_names: Dict[str, int] = {
         c.bidderName: c.companyRecordId for c in companies
@@ -548,16 +667,31 @@ def handle_bidder_name_similar(
 def handle_same_bid_contact_similar(
     companies: List[CompanyInfo],
     pdf_paths: Dict[int, str],
+    batch_id: int = 0,
 ) -> List[CompanyResult]:
     """同标段单位联系人雷同 — 检查人名、手机号、邮箱跨公司雷同"""
-    from extraction.contact_extractor import extract_contacts_from_text
+    from extraction.contact_extractor import extract_contacts_from_sqlite, extract_contacts_from_text
+    from extraction.feature_cache import DocumentCache
 
     contacts = {}
-    for c in companies:
-        path = pdf_paths.get(c.companyRecordId)
-        if path and os.path.exists(path):
-            text = _extract_text_preview(path)
-            contacts[c.companyRecordId] = extract_contacts_from_text(text)
+    doc_id_map = _warm_text_cache(batch_id, companies, pdf_paths) if batch_id else {}
+    cache = None
+    if doc_id_map:
+        dirs = _get_batch_work_dirs(batch_id, "text")
+        cache = DocumentCache(dirs["cache_dir"])
+    try:
+        for c in companies:
+            doc_id = doc_id_map.get(c.companyRecordId)
+            if cache is not None and doc_id:
+                contacts[c.companyRecordId] = extract_contacts_from_sqlite(doc_id, cache)
+                continue
+            path = pdf_paths.get(c.companyRecordId)
+            if path and os.path.exists(path):
+                text = _extract_text_preview(path)
+                contacts[c.companyRecordId] = extract_contacts_from_text(text)
+    finally:
+        if cache is not None:
+            cache.close()
 
     mobile_index: Dict[str, List[int]] = {}
     phone_index: Dict[str, List[int]] = {}
@@ -683,47 +817,19 @@ def _run_full_pipeline(
         logger.info(f"复用 {dimension} 管线结果 (batch {batch_id})")
         return cached
 
-    from config import DetectionConfig
     from pipeline.orchestrator import BidDetectionOrchestrator
 
-    stable_workdir = os.environ.get("COLLUSIVE_STABLE_WORKDIR", "1").lower() in ("1", "true", "yes")
-    if stable_workdir:
-        work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}_{dimension}")
-    else:
-        work_dir = os.path.join(WORK_DIR, f"batch_{batch_id}_{dimension}_{uuid.uuid4().hex[:8]}")
-    input_dir = os.path.join(work_dir, "input")
-    output_dir = os.path.join(work_dir, "output")
-    cache_dir = os.path.join(work_dir, "cache")
-    ckpt_dir = os.path.join(work_dir, "checkpoints")
+    dirs = _get_batch_work_dirs(batch_id, dimension)
+    work_dir = dirs["work_dir"]
+    input_dir = dirs["input_dir"]
+    output_dir = dirs["output_dir"]
+    cache_dir = dirs["cache_dir"]
+    ckpt_dir = dirs["ckpt_dir"]
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    doc_id_map = {}
-    for c in companies:
-        src = pdf_paths.get(c.companyRecordId)
-        if src and os.path.exists(src):
-            safe_name = f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf"
-            dst = os.path.join(input_dir, safe_name)
-            shutil.copy2(src, dst)
-            doc_id_map[c.companyRecordId] = safe_name
-
-    config = DetectionConfig()
-    config.CACHE_DIR = cache_dir
-    config.CHECKPOINT_DIR = ckpt_dir
-    config.TEXT_EMBEDDING_CACHE_DIR = os.environ.get(
-        "TEXT_EMBEDDING_CACHE_DIR",
-        os.path.join(WORK_DIR, "shared_embedding_cache"),
-    )
-    config.ENABLE_OCR = os.environ.get("COLLUSIVE_ENABLE_OCR", "1").lower() in ("1", "true", "yes")
-    config.ENABLE_IMAGE_ANALYSIS = os.environ.get("COLLUSIVE_ENABLE_IMAGE_ANALYSIS", "1").lower() in ("1", "true", "yes")
-    config.OCR_ENGINE = "paddleocr"
-    config.USE_GPU = False
-    config.SBERT_DEVICE = "cpu"
-    config.SBERT_BATCH_SIZE = int(os.environ.get("SBERT_BATCH_SIZE", config.SBERT_BATCH_SIZE))
-    config.PHASE1_WORKERS = int(os.environ.get("PHASE1_WORKERS", config.PHASE1_WORKERS))
-    config.PHASE3_WORKERS = int(os.environ.get("PHASE3_WORKERS", config.PHASE3_WORKERS))
-    config.TOC_FILTER_ENABLED = True
-    config.ANALYSIS_DIMENSION = dimension
+    doc_id_map = _copy_batch_inputs(batch_id, companies, pdf_paths, input_dir)
+    config = _build_pipeline_config(cache_dir, ckpt_dir, dimension)
 
     logger.info(f"运行全量管线: {len(pdf_paths)} 个文件, dimension={dimension}")
     t0 = time.time()
@@ -747,8 +853,8 @@ def _run_full_pipeline(
                 f"{report.suspicious_pairs} 对可疑")
 
     doc_to_record: Dict[str, int] = {}
-    for record_id, doc_name in doc_id_map.items():
-        doc_to_record[doc_name] = record_id
+    for record_id, doc_id in doc_id_map.items():
+        doc_to_record[doc_id] = record_id
 
     text_results = {}
     image_results = {}
@@ -976,9 +1082,9 @@ def _dispatch_handler(
     elif item_code == "DOC_AUTHOR_SIMILAR":
         return handle_doc_author_similar(companies, pdf_paths)
     elif item_code == "SAME_BID_CONTACT_SIMILAR":
-        return handle_same_bid_contact_similar(companies, pdf_paths)
+        return handle_same_bid_contact_similar(companies, pdf_paths, batch_id)
     elif item_code == "SAME_bidderName_SIMILAR":
-        return handle_bidder_name_similar(companies, pdf_paths)
+        return handle_bidder_name_similar(companies, pdf_paths, batch_id)
     elif item_code in HEAVY_ITEMS:
         pipeline_result = _run_full_pipeline(
             batch_id, companies, pdf_paths, item_code=item_code,
@@ -1084,13 +1190,20 @@ async def startup_event():
     try:
         from sentence_transformers import SentenceTransformer
         global _global_sbert_model
+        sbert_device = os.environ.get("SBERT_DEVICE", "cpu").lower()
+        if sbert_device == "auto":
+            try:
+                import torch
+                sbert_device = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:
+                sbert_device = "cpu"
         _global_sbert_model = SentenceTransformer(
             'paraphrase-multilingual-MiniLM-L12-v2',
-            device='cpu', cache_folder='./models',
+            device=sbert_device, cache_folder='./models',
             trust_remote_code=True, local_files_only=True,
         )
-        print("  SBERT 加载完成")
-        logger.info("  SBERT 离线加载完成")
+        print(f"  SBERT 加载完成 ({sbert_device})")
+        logger.info(f"  SBERT 离线加载完成 ({sbert_device})")
     except Exception as e:
         print(f"  SBERT 本地加载失败: {e}")
         print("  SBERT 将在首次请求时按需加载")
