@@ -933,20 +933,8 @@ def _run_full_pipeline(
                     "source_b": img_pair.get("source_b", ""),
                     "page_a": img_pair.get("page_a", -1),
                     "page_b": img_pair.get("page_b", -1),
-                    "width_a": img_pair.get("width_a", 0),
-                    "height_a": img_pair.get("height_a", 0),
-                    "width_b": img_pair.get("width_b", 0),
-                    "height_b": img_pair.get("height_b", 0),
                     "confidence": round(img_pair.get("confidence", 0.0), 4),
                     "phash_dist": img_pair.get("phash_dist", -1),
-                    "dhash_dist": img_pair.get("dhash_dist", -1),
-                    "orb_match_ratio": round(img_pair.get("orb_match_ratio", 0.0), 4),
-                    "histogram_correlation": round(img_pair.get("histogram_correlation", 0.0), 4),
-                    "reasons": img_pair.get("reasons", []),
-                    "thumbnail_base64_a": img_pair.get("thumbnail_base64_a", ""),
-                    "thumbnail_base64_b": img_pair.get("thumbnail_base64_b", ""),
-                    "ocr_text_a": (img_pair.get("ocr_text_a", "") or "")[:200],
-                    "ocr_text_b": (img_pair.get("ocr_text_b", "") or "")[:200],
                 })
 
         image_results[pair_key] = {
@@ -1047,10 +1035,22 @@ def _get_company_results_from_pipeline(
                 "imageMatchCount": ir.get("total_image_matches", 0),
                 "similarImages": img_pairs,
             })
+            # 对公司 B：swap a↔b，使 source_a 指向 B 自己的图（被检测方），
+            # source_b 指向 A 的图（对比方）
+            swapped_pairs = []
+            for ip in img_pairs:
+                swapped_pairs.append({
+                    "source_a": ip.get("source_b", ""),
+                    "source_b": ip.get("source_a", ""),
+                    "page_a": ip.get("page_b", -1),
+                    "page_b": ip.get("page_a", -1),
+                    "confidence": ip.get("confidence", 0.0),
+                    "phash_dist": ip.get("phash_dist", -1),
+                })
             company_evidence[b]["image_details"].append({
                 "companyRecordId": a,
                 "imageMatchCount": ir.get("total_image_matches", 0),
-                "similarImages": img_pairs,
+                "similarImages": swapped_pairs,
             })
 
     results = []

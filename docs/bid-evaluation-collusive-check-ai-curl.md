@@ -292,20 +292,8 @@ py/AI 返回当前检查项下每家公司的检查结论。
           "source_b": "page3_img0.png",
           "page_a": 5,
           "page_b": 3,
-          "width_a": 640,
-          "height_a": 480,
-          "width_b": 640,
-          "height_b": 480,
           "confidence": 0.92,
-          "phash_dist": 2,
-          "dhash_dist": 4,
-          "orb_match_ratio": 0.81,
-          "histogram_correlation": 0.96,
-          "reasons": ["phash_match", "orb_match"],
-          "thumbnail_base64_a": "data:image/jpeg;base64,/9j/...",
-          "thumbnail_base64_b": "data:image/jpeg;base64,/9j/...",
-          "ocr_text_a": "施工平面图",
-          "ocr_text_b": "施工平面图"
+          "phash_dist": 2
         }
       ]
     }
@@ -328,24 +316,12 @@ py/AI 返回当前检查项下每家公司的检查结论。
 | `similarImages[].companyRecordId` | 对方公司记录 ID。 |
 | `similarImages[].imageMatchCount` | 匹配图片总数。 |
 | `similarImages[].similarImages` | 相似图片对列表（最多 20 对）。 |
-| `similarImages[].similarImages[].source_a` | 本公司图片引用。 |
-| `similarImages[].similarImages[].source_b` | 对方公司图片引用。 |
-| `similarImages[].similarImages[].page_a` | 本公司图片所在页码。 |
-| `similarImages[].similarImages[].page_b` | 对方公司图片所在页码。 |
-| `similarImages[].similarImages[].width_a` | 本公司图片宽度（像素）。 |
-| `similarImages[].similarImages[].height_a` | 本公司图片高度（像素）。 |
-| `similarImages[].similarImages[].width_b` | 对方公司图片宽度（像素）。 |
-| `similarImages[].similarImages[].height_b` | 对方公司图片高度（像素）。 |
-| `similarImages[].similarImages[].confidence` | 匹配置信度。 |
+| `similarImages[].similarImages[].source_a` | **被检测方**（当前公司）的图片引用。 |
+| `similarImages[].similarImages[].source_b` | **对比方**（与之对比后发现相似的公司）的图片引用。 |
+| `similarImages[].similarImages[].page_a` | 被检测方图片所在页码。 |
+| `similarImages[].similarImages[].page_b` | 对比方图片所在页码。 |
+| `similarImages[].similarImages[].confidence` | 匹配置信度（0~1）。 |
 | `similarImages[].similarImages[].phash_dist` | 感知哈希距离，越小越相似。 |
-| `similarImages[].similarImages[].dhash_dist` | 差异哈希距离，越小越相似。 |
-| `similarImages[].similarImages[].orb_match_ratio` | ORB 特征匹配比例。 |
-| `similarImages[].similarImages[].histogram_correlation` | 颜色直方图相关度。 |
-| `similarImages[].similarImages[].reasons` | 匹配原因列表。 |
-| `similarImages[].similarImages[].thumbnail_base64_a` | 本公司相似图片缩略图 data URI，前端可直接展示。 |
-| `similarImages[].similarImages[].thumbnail_base64_b` | 对方公司相似图片缩略图 data URI，前端可直接展示。 |
-| `similarImages[].similarImages[].ocr_text_a` | 本公司图片 OCR 文本（截断 200 字符）。 |
-| `similarImages[].similarImages[].ocr_text_b` | 对方公司图片 OCR 文本（截断 200 字符）。 |
 
 ## 10. 异常处理规则
 

@@ -1,89 +1,100 @@
-# .gitignore for BatchBidCollusionDetector
+# ============================================================
+# .gitignore — 围标串标检测系统
+# ============================================================
 
-# Python
+# ── Python 编译产物 ─────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-env/
+
+# ── 虚拟环境 / 包管理 ────────────────────────────────────────
 venv/
+.env/
+.venv/
 ENV/
+env/
 build/
-develop-eggs/
 dist/
+*.egg-info/
+*.egg
+.eggs/
+.Python
+develop-eggs/
 downloads/
 eggs/
-.eggs/
 lib/
 lib64/
 parts/
 sdist/
 var/
 wheels/
-*.egg-info/
 .installed.cfg
-*.egg
-cache/
 
-# 测试和报告
-test_data/
-*.log
-detection.log
-.pytest_cache/
-.coverage
-htmlcov/
-
-# IDE
+# ── IDE / 编辑器 ────────────────────────────────────────────
 .idea/
 .vscode/
+.trae/
 *.swp
 *.swo
 *~
+.claude/
+
+# ── 操作系统 ────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
+desktop.ini
 
-# 临时文件
-*.tmp
-*.bak
-*.backup
-
-# 输出文件
-report/
-output/
-input1/
-results/
-
-# 配置文件（可能包含敏感信息）
+# ── 敏感配置（包含密钥/密码，不入仓）─────────────────────────
+.env
 config.json
 
-# 深度学习模型文件（大文件，排除上传）
+# ── 模型文件（大文件，离线下载）──────────────────────────────
 models/
 *.safetensors
 *.bin
 *.pt
 *.pth
 *.ckpt
+*.onnx
 
-# 输入数据（投标文件PDF等测试数据，大文件不应入仓）
-input/
-
-# 旧的缓存和检查点（运行产物，不应入仓）
-cache_old_*/
-checkpoints_old/
-
-# API 运行时产物
-workdir/
-checkpoints/
-runtime/
-output/
+# ── 日志 ────────────────────────────────────────────────────
 *.log
 
-# IDE配置
-.claude/
+# ── 运行时产物（下载缓存 / 工作目录 / 检查点）────────────────
+batch_downloads/
+collusive_workdir/
+cache/
+workdir/
+checkpoints/
+cache_old_*/
+checkpoints_old*/
+runtime/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# ── 测试产物 ────────────────────────────────────────────────
+test_output/
+.pytest_cache/
+.coverage
+htmlcov/
+test_data/
 
-# 系统文件
-Thumbs.db
-desktop.ini
+# ── 报告 / 输出 ─────────────────────────────────────────────
+output/
+report/
+results/
+input/
+input1/
+
+# ── 压缩包 / 构建产物 ───────────────────────────────────────
+*.zip
+*.tar.gz
+*.whl
+
+# ── 临时文件 ────────────────────────────────────────────────
+*.tmp
+*.bak
+*.backup
+
+# ── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints

@@ -332,6 +332,31 @@ class PyMuPDFExtractor(BasePDFExtractor):
             merged = new_list
         return merged
 
+    @staticmethod
+    def _bbox_overlap_ratio(
+        a: Tuple[float, float, float, float],
+        b: Tuple[float, float, float, float],
+    ) -> float:
+        """返回 b 覆盖 a 的面积比例，用于避免碎片被重复单独处理。"""
+        ix0 = max(a[0], b[0])
+        iy0 = max(a[1], b[1])
+        ix1 = min(a[2], b[2])
+        iy1 = min(a[3], b[3])
+        if ix0 >= ix1 or iy0 >= iy1:
+            return 0.0
+        area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+        if area_a <= 0:
+            return 0.0
+        return ((ix1 - ix0) * (iy1 - iy0)) / area_a
+
+    def _is_region_covered(
+        self,
+        bbox: Tuple[float, float, float, float],
+        regions: List[Tuple[float, float, float, float]],
+        threshold: float = 0.5,
+    ) -> bool:
+        return any(self._bbox_overlap_ratio(bbox, rb) >= threshold for rb in regions)
+
     def _render_region(self, page, bbox, page_w, page_h, min_size, zoom=200/72.0):
         """渲染页面指定区域并返回 pHash，失败返回 None"""
         try:
@@ -371,33 +396,69 @@ class PyMuPDFExtractor(BasePDFExtractor):
         """
         import fitz
         hashes = []
+        seen_hashes = set()
         min_size = getattr(self.config, 'IMAGE_MIN_SIZE', 50)
         zoom = 200 / 72.0
+        vector_min_area_ratio = getattr(self.config, 'OCR_VECTOR_MIN_AREA_RATIO', 0.01)
+        vector_max_area_ratio = getattr(self.config, 'OCR_VECTOR_MAX_AREA_RATIO', 0.35)
+        vector_max_side_ratio = getattr(self.config, 'OCR_VECTOR_MAX_SIDE_RATIO', 0.85)
 
         for page_num in range(start_page, min(end_page, doc.page_count)):
             try:
                 page = doc[page_num]
                 page_w = page.rect.width
                 page_h = page.rect.height
+                page_area = max(1.0, page_w * page_h)
                 rendered_regions = []  # 已渲染的区域，避免重复
+                image_list = page.get_images(full=True)
+                small_fragment_present = False
+                for img_info in image_list:
+                    try:
+                        xref = img_info[0]
+                        w, h = img_info[2], img_info[3]
+                        base = doc.extract_image(xref)
+                        ext = (base.get("ext") or "").lower() if base else ""
+                        if ext == "png" and (w < min_size * 2 or h < min_size * 2):
+                            small_fragment_present = True
+                            break
+                    except Exception:
+                        continue
 
                 # === 策略1: cluster_drawings 检测矢量绘图集群 ===
                 # 只渲染检测到的矢量/碎片合并区域，不做整页渲染。
-                try:
-                    clusters = page.cluster_drawings(
-                        x_tolerance=10, y_tolerance=10, final_filter=False
-                    )
-                    for cl in clusters:
-                        bbox = (cl.x0, cl.y0, cl.x1, cl.y1)
-                        w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
-                        if w < 50 or h < 50:
-                            continue
-                        ph = self._render_region(page, bbox, page_w, page_h, min_size, zoom)
-                        if ph is not None:
-                            hashes.append(f"p{ph}")
-                            rendered_regions.append(bbox)
-                except Exception:
-                    pass
+                # 只有页面存在小 PNG 碎片时才启用，避免把普通表格线/矢量装饰当图片。
+                if small_fragment_present:
+                    try:
+                        clusters = page.cluster_drawings(
+                            x_tolerance=10, y_tolerance=10, final_filter=False
+                        )
+                        for cl in clusters:
+                            bbox = (cl.x0, cl.y0, cl.x1, cl.y1)
+                            w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
+                            if w < 50 or h < 50:
+                                continue
+                            area_ratio = (
+                                max(0.0, w) * max(0.0, h)
+                            ) / page_area
+                            side_like_page = (
+                                w / max(page_w, 1) >= vector_max_side_ratio
+                                or h / max(page_h, 1) >= vector_max_side_ratio
+                            )
+                            if (
+                                area_ratio < vector_min_area_ratio
+                                or area_ratio > vector_max_area_ratio
+                                or side_like_page
+                            ):
+                                continue
+                            ph = self._render_region(page, bbox, page_w, page_h, min_size, zoom)
+                            if ph is not None:
+                                hval = f"page_{page_num}:p{ph}"
+                                if hval not in seen_hashes:
+                                    hashes.append(hval)
+                                    seen_hashes.add(hval)
+                                rendered_regions.append(bbox)
+                    except Exception:
+                        pass
 
                 # === 策略2: get_image_info + bbox 合并 ===
                 image_info = page.get_image_info()
@@ -406,8 +467,7 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     bbox = info.get('bbox')
                     if bbox and len(bbox) == 4:
                         x0, y0, x1, y1 = bbox
-                        if (x1-x0) >= min_size and (y1-y0) >= min_size \
-                           and x0 > -10 and y0 > -10 \
+                        if x0 > -10 and y0 > -10 \
                            and x1 < page_w + 10 and y1 < page_h + 10:
                             all_bboxes.append(bbox)
 
@@ -415,32 +475,30 @@ class PyMuPDFExtractor(BasePDFExtractor):
                     # 过滤掉已被 cluster_drawings 覆盖的区域
                     remaining = []
                     for b in all_bboxes:
-                        covered = False
-                        for rb in rendered_regions:
-                            ix = max(b[0], rb[0]); iy = max(b[1], rb[1])
-                            ix2 = min(b[2], rb[2]); iy2 = min(b[3], rb[3])
-                            if ix < ix2 and iy < iy2:
-                                overlap = (ix2-ix)*(iy2-iy)
-                                area_b = (b[2]-b[0])*(b[3]-b[1])
-                                if area_b > 0 and overlap/area_b > 0.5:
-                                    covered = True
-                                    break
-                        if not covered:
+                        if not self._is_region_covered(b, rendered_regions, threshold=0.5):
                             remaining.append(b)
 
                     merged = self._merge_overlapping_bboxes(remaining, gap=8)
                     for bbox in merged:
+                        if (bbox[2] - bbox[0]) < min_size or (bbox[3] - bbox[1]) < min_size:
+                            continue
                         ph = self._render_region(page, bbox, page_w, page_h, min_size, zoom)
                         if ph is not None:
-                            hashes.append(f"p{ph}")
+                            hval = f"page_{page_num}:p{ph}"
+                            if hval not in seen_hashes:
+                                hashes.append(hval)
+                                seen_hashes.add(hval)
                             rendered_regions.append(bbox)
 
                 # === 策略3: 兜底 — 孤立图片直接用 extract_image ===
-                image_list = page.get_images(full=True)
                 if image_list:
+                    seen_xrefs = set()
                     for img_info in image_list:
                         try:
                             xref = img_info[0]
+                            if xref in seen_xrefs:
+                                continue
+                            seen_xrefs.add(xref)
                             # 获取这个图片的 bbox
                             img_name = img_info[7] if len(img_info) > 7 else None
                             img_bbox = None
@@ -452,19 +510,10 @@ class PyMuPDFExtractor(BasePDFExtractor):
                                 except Exception:
                                     pass
                             # 检查是否已被覆盖
-                            if img_bbox:
-                                covered = False
-                                for rb in rendered_regions:
-                                    ix = max(img_bbox[0], rb[0]); iy = max(img_bbox[1], rb[1])
-                                    ix2 = min(img_bbox[2], rb[2]); iy2 = min(img_bbox[3], rb[3])
-                                    if ix < ix2 and iy < iy2:
-                                        overlap = (ix2-ix)*(iy2-iy)
-                                        area = (img_bbox[2]-img_bbox[0])*(img_bbox[3]-img_bbox[1])
-                                        if area > 0 and overlap/area > 0.5:
-                                            covered = True
-                                            break
-                                if covered:
-                                    continue
+                            if img_bbox and self._is_region_covered(
+                                img_bbox, rendered_regions, threshold=0.5
+                            ):
+                                continue
 
                             # 过滤和提取
                             w, h = img_info[2], img_info[3]
@@ -482,21 +531,45 @@ class PyMuPDFExtractor(BasePDFExtractor):
                             if img.mode not in ('RGB', 'L'):
                                 img = img.convert('RGB')
                             ph = imagehash.phash(img)
-                            hashes.append(f"p{ph}")
+                            hval = f"page_{page_num}:p{ph}"
+                            if hval not in seen_hashes:
+                                hashes.append(hval)
+                                seen_hashes.add(hval)
                         except Exception:
                             continue
 
-                # === 策略4: 对所有嵌入图片补充原始字节哈希 ===
-                # 确保相同图片无论渲染位置是否相同，都有一致的原始字节哈希。
+                # === 策略4: 仅对未被合并区域覆盖的孤立嵌入图补充原始字节哈希 ===
+                # 不能再无条件遍历所有 xref，否则 Word/PDF 底层切成几百个 tile 时，
+                # 会把碎片当成几百张独立图片做哈希。
                 try:
+                    seen_xrefs = set()
                     for img_info in page.get_images(full=True):
                         try:
                             xref = img_info[0]
+                            if xref in seen_xrefs:
+                                continue
+                            seen_xrefs.add(xref)
                             w, h = img_info[2], img_info[3]
                             if w < min_size or h < min_size:
                                 continue
+                            img_name = img_info[7] if len(img_info) > 7 else None
+                            img_bbox = None
+                            if img_name:
+                                try:
+                                    bobj = page.get_image_bbox(img_name)
+                                    if bobj:
+                                        img_bbox = (bobj.x0, bobj.y0, bobj.x1, bobj.y1)
+                                except Exception:
+                                    pass
+                            if img_bbox and self._is_region_covered(
+                                img_bbox, rendered_regions, threshold=0.5
+                            ):
+                                continue
                             base = doc.extract_image(xref)
                             if not base or not base.get("image"):
+                                continue
+                            ext = (base.get("ext") or "").lower()
+                            if ext == "png" and (w < min_size * 2 or h < min_size * 2):
                                 continue
                             img_bytes = base["image"]
                             if len(img_bytes) < 1024:
@@ -506,9 +579,10 @@ class PyMuPDFExtractor(BasePDFExtractor):
                                 img = img.convert('RGB')
                             img.thumbnail((256, 256), Image.LANCZOS)
                             ph = imagehash.phash(img)
-                            h = f"p{ph}"
-                            if h not in hashes:
-                                hashes.append(h)
+                            hval = f"page_{page_num}:p{ph}"
+                            if hval not in seen_hashes:
+                                hashes.append(hval)
+                                seen_hashes.add(hval)
                         except Exception:
                             continue
                 except Exception:

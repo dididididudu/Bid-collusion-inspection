@@ -258,13 +258,18 @@ def _collect_page_ocr_tasks(
         except Exception as e:
             logger.debug(f"OCR: 第 {page_num} 页嵌入图片 xref={xref} 提取失败: {e}")
 
-    # 矢量图或碎片图：只对合并后的大区域 OCR，不对小碎片逐个 OCR。
-    try:
-        raw_clusters = page.cluster_drawings(
-            x_tolerance=10, y_tolerance=10, final_filter=False
-        )
-    except Exception as e:
-        logger.debug(f"OCR: 第 {page_num} 页 cluster_drawings 失败: {e}")
+    # 矢量图或碎片图：只在发现小 PNG 碎片时启用 cluster_drawings。
+    # 普通表格线/矢量装饰也会被 cluster_drawings 捕获；如果无小图片碎片信号，
+    # 不渲染这些区域，避免把大量版式线条当图片 OCR。
+    if small_fragment_bboxes:
+        try:
+            raw_clusters = page.cluster_drawings(
+                x_tolerance=10, y_tolerance=10, final_filter=False
+            )
+        except Exception as e:
+            logger.debug(f"OCR: 第 {page_num} 页 cluster_drawings 失败: {e}")
+            raw_clusters = []
+    else:
         raw_clusters = []
 
     cluster_bboxes = list(small_fragment_bboxes)
