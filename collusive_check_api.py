@@ -928,13 +928,19 @@ def _run_full_pipeline(
             if dim in ("com_image", "tech_image+com_image"):
                 com_img_count += 1
             if len(image_pair_summaries) < 20:
+                source_a = img_pair.get("source_a", "")
+                source_b = img_pair.get("source_b", "")
+                # TODO: 替换为真实的图片访问 URL
+                IMAGE_BASE_URL = "https://example.com/files"
                 image_pair_summaries.append({
-                    "source_a": img_pair.get("source_a", ""),
-                    "source_b": img_pair.get("source_b", ""),
+                    "source_a": source_a,
+                    "source_b": source_b,
                     "page_a": img_pair.get("page_a", -1),
                     "page_b": img_pair.get("page_b", -1),
                     "confidence": round(img_pair.get("confidence", 0.0), 4),
                     "phash_dist": img_pair.get("phash_dist", -1),
+                    "image_url_a": f"{IMAGE_BASE_URL}/{source_a}" if source_a else "",
+                    "image_url_b": f"{IMAGE_BASE_URL}/{source_b}" if source_b else "",
                 })
 
         image_results[pair_key] = {
