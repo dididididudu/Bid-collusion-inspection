@@ -7,6 +7,7 @@ Stage 2b: SBERT semantic verification (finds reworded/synonymous content)
 """
 
 import logging
+import hashlib
 import jieba
 from difflib import SequenceMatcher
 from typing import List, Dict, Tuple, Optional
@@ -295,12 +296,31 @@ class ParagraphMatcher:
         # === 标书模板语过滤：降低招标文件原文/通用模板语的权重 ===
         if getattr(self.config, 'BID_BOILERPLATE_FILTER', False):
             boilerplate_count = 0
+            hard_filtered_count = 0
+            template_hashes = set(getattr(self.config, 'BID_TEMPLATE_TEXT_HASHES', []) or [])
             for result in stage2_results:
-                bp_ratio = _compute_boilerplate_ratio(
-                    result.get('paragraph_a', ''),
-                    result.get('paragraph_b', ''),
+                text_a = result.get('paragraph_a', '')
+                text_b = result.get('paragraph_b', '')
+                bp_ratio = _compute_boilerplate_ratio(text_a, text_b)
+                info_score = min(
+                    _compute_informativeness_score(text_a, bp_ratio),
+                    _compute_informativeness_score(text_b, bp_ratio),
+                )
+                hash_a = _template_text_hash(text_a)
+                hash_b = _template_text_hash(text_b)
+                batch_common = bool(
+                    template_hashes
+                    and (hash_a in template_hashes or hash_b in template_hashes)
                 )
                 result['boilerplate_ratio'] = bp_ratio
+                result['informativeness_score'] = round(info_score, 4)
+                result['batch_common_template'] = batch_common
+
+                if _should_hard_filter_template_match(result, self.config):
+                    result['filtered_reason'] = 'template_low_information'
+                    hard_filtered_count += 1
+                    continue
+
                 # 模板语比例越高，相似度衰减越多
                 weight = getattr(self.config, 'BID_BOILERPLATE_WEIGHT', 0.3)
                 decay = 1.0 - bp_ratio * weight
@@ -314,6 +334,16 @@ class ParagraphMatcher:
                     f"Boilerplate filter: {boilerplate_count}/{len(stage2_results)} "
                     f"matches have high template language ratio"
                 )
+            if hard_filtered_count > 0:
+                logger.info(
+                    f"Template hard filter: removed {hard_filtered_count} "
+                    f"low-information boilerplate matches"
+                )
+
+            stage2_results = [
+                r for r in stage2_results
+                if r.get('filtered_reason') != 'template_low_information'
+            ]
 
             # 衰减后重新阈值过滤：模板语导致相似度衰减后低于阈值的匹配应移除
             # （如"投标人名称：A公司（公章）" 原始 sim=0.90 通过阈值，衰减后 0.84 应被过滤）
@@ -550,13 +580,18 @@ _BID_BOILERPLATE_PATTERNS = [
     'BUG', '修复', '运行异常处理', '响应',
     # 招标响应类
     '符合招标文件', '满足招标', '无偏离', '完全响应', '正偏离',
-    '招标文件要求', '技术规格', '商务条款',
+    '招标文件要求', '技术规格', '商务条款', '采购文件要求',
+    '响应招标文件', '响应采购文件', '按照招标文件', '严格按照',
+    '采购人要求', '招标人要求', '本项目要求', '本项目',
     # 格式模板类
     '序号', '项目名称', '规格型号', '技术参数', '备注',
-    '投标人名称', '法定代表人', '授权代表',
+    '投标人名称', '法定代表人', '授权代表', '盖章', '签字',
+    '日期', '联系人', '联系电话',
     # 通用管理类
     '质量保证体系', '安全管理', '环境保护', '文明施工',
     '项目管理', '进度计划', '资源配置', '人员配备',
+    '施工方案', '施工组织设计', '施工组织', '确保质量',
+    '确保安全', '按时完成', '保质保量', '法律法规',
 ]
 
 
@@ -573,3 +608,85 @@ def _compute_boilerplate_ratio(text_a: str, text_b: str) -> float:
     b_hits = sum(len(m.group()) for m in _BOILERPLATE_RE.finditer(text_b))
     return max(min(1.0, a_hits / max(len(text_a), 1)),
                min(1.0, b_hits / max(len(text_b), 1)))
+
+
+def _normalize_template_text(text: str) -> str:
+    """归一化模板段落文本，用于跨文档统计同源模板句。"""
+    text = _re.sub(r"\s+", "", text or "")
+    text = _re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9_.+-]+", "EMAIL", text)
+    text = _re.sub(r"1[3-9]\d{9}", "PHONE", text)
+    text = _re.sub(r"\d+(?:\.\d+)?", "#", text)
+    return text[:500]
+
+
+def _template_text_hash(text: str) -> str:
+    norm = _normalize_template_text(text)
+    if not norm:
+        return ''
+    return hashlib.md5(norm.encode('utf-8')).hexdigest()
+
+
+def _compute_informativeness_score(text: str, boilerplate_ratio: float = 0.0) -> float:
+    """估算段落证据价值。
+
+    分数越高，越像包含项目特异信息；分数越低，越像通用承诺、格式字段、
+    招标文件原文或模板套话。
+    """
+    if not text:
+        return 0.0
+
+    compact = _re.sub(r"\s+", "", text)
+    tokens = [w for w in jieba.cut(compact) if len(w) >= 2]
+    unique_tokens = set(tokens)
+    long_tokens = [w for w in unique_tokens if len(w) >= 4]
+    digit_groups = _re.findall(r"\d+(?:\.\d+)?", compact)
+    specific_markers = [
+        '型号', '设备', '品牌', '参数', '编号', '节点', '工期',
+        '人员', '岗位', '证书', '系统', '模块', '接口', '数据库',
+        '算法', '流程', '清单', '报价', '金额', '数量', '规格',
+    ]
+    marker_hits = sum(1 for kw in specific_markers if kw in compact)
+
+    token_score = min(0.25, len(unique_tokens) / 40)
+    long_token_score = min(0.20, len(long_tokens) / 25)
+    digit_score = min(0.20, len(digit_groups) / 20)
+    marker_score = min(0.25, marker_hits / 12)
+    length_score = min(0.10, len(compact) / 800)
+    penalty = min(0.35, boilerplate_ratio * 0.35)
+
+    score = token_score + long_token_score + digit_score + marker_score + length_score - penalty
+    return max(0.0, min(1.0, score))
+
+
+def _should_hard_filter_template_match(result: Dict, config: DetectionConfig) -> bool:
+    """判断段落匹配是否只属于模板套话，不进入相似证据。"""
+    if not getattr(config, 'BID_TEMPLATE_HARD_FILTER', True):
+        return False
+
+    bp_ratio = result.get('boilerplate_ratio', 0.0)
+    info_score = result.get('informativeness_score', 1.0)
+    batch_common = result.get('batch_common_template', False)
+    sim = result.get('similarity', 0.0)
+    text_a = result.get('paragraph_a', '') or ''
+    text_b = result.get('paragraph_b', '') or ''
+    avg_len = (len(text_a) + len(text_b)) / 2
+
+    bp_threshold = getattr(config, 'BID_TEMPLATE_RATIO_THRESHOLD', 0.55)
+    info_threshold = getattr(config, 'BID_TEMPLATE_MIN_INFO_SCORE', 0.28)
+
+    if avg_len < 8:
+        return True
+
+    # 批次高频模板段落：即便相似度高，也更像公共模板。
+    if batch_common and info_score < max(0.40, info_threshold + 0.08):
+        return True
+
+    # 高模板覆盖 + 低信息量：直接不作为证据。
+    if bp_ratio >= bp_threshold and info_score < info_threshold:
+        return True
+
+    # 短格式字段对相似度特别敏感，低信息量时直接过滤。
+    if avg_len < 80 and bp_ratio >= 0.35 and info_score < 0.35 and sim < 0.98:
+        return True
+
+    return False

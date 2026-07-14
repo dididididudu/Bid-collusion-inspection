@@ -142,6 +142,12 @@ class DetectionConfig:
     IMAGE_BOILERPLATE_HASHES: list = field(default_factory=list)  # 已知模板哈希黑名单（方案6）
     BID_BOILERPLATE_FILTER: bool = True
     BID_BOILERPLATE_WEIGHT: float = 0.3
+    BID_TEMPLATE_HARD_FILTER: bool = True          # 高模板/低信息量段落不作为相似证据
+    BID_TEMPLATE_RATIO_THRESHOLD: float = 0.55     # 模板语覆盖比例阈值
+    BID_TEMPLATE_MIN_INFO_SCORE: float = 0.28      # 低于该信息量视为弱证据
+    BID_TEMPLATE_BATCH_DOC_RATIO: float = 0.30     # 出现在 >=30% 文档中的段落视为批次高频模板
+    BID_TEMPLATE_BATCH_MIN_DOCS: int = 3           # 至少出现于 3 个文档才按批次高频过滤
+    BID_TEMPLATE_TEXT_HASHES: list = field(default_factory=list)  # Phase 3 前动态写入
 
     # ── 目录排除（方案六：目录结构雷同不参与查重）──
     TOC_FILTER_ENABLED: bool = True      # 启用目录段落过滤
@@ -262,6 +268,29 @@ class DetectionConfig:
         elif env_phase3_pool in ('false', '0', 'no'):
             self.PHASE3_USE_PROCESS_POOL = False
             logger.info("PHASE3_USE_PROCESS_POOL 从环境变量加载: False")
+
+        env_template_filter = os.environ.get('BID_TEMPLATE_HARD_FILTER', '').lower()
+        if env_template_filter in ('true', '1', 'yes'):
+            self.BID_TEMPLATE_HARD_FILTER = True
+            logger.info("BID_TEMPLATE_HARD_FILTER 从环境变量加载: True")
+        elif env_template_filter in ('false', '0', 'no'):
+            self.BID_TEMPLATE_HARD_FILTER = False
+            logger.info("BID_TEMPLATE_HARD_FILTER 从环境变量加载: False")
+
+        for env_name, attr, cast in [
+            ('BID_TEMPLATE_RATIO_THRESHOLD', 'BID_TEMPLATE_RATIO_THRESHOLD', float),
+            ('BID_TEMPLATE_MIN_INFO_SCORE', 'BID_TEMPLATE_MIN_INFO_SCORE', float),
+            ('BID_TEMPLATE_BATCH_DOC_RATIO', 'BID_TEMPLATE_BATCH_DOC_RATIO', float),
+            ('BID_TEMPLATE_BATCH_MIN_DOCS', 'BID_TEMPLATE_BATCH_MIN_DOCS', int),
+        ]:
+            raw = os.environ.get(env_name, '')
+            if not raw:
+                continue
+            try:
+                setattr(self, attr, cast(raw))
+                logger.info(f"{env_name} 从环境变量加载: {getattr(self, attr)}")
+            except ValueError:
+                logger.warning(f"{env_name} 配置无效: {raw}")
 
         if self.PADDLEOCR_HOME is None:
             env_home = os.environ.get('PADDLEOCR_HOME', '')

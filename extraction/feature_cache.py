@@ -32,7 +32,7 @@ class DocumentCache:
     """SQLite 支持的文档特征缓存"""
 
     # 当前数据库模式版本
-    SCHEMA_VERSION = 10  # v10: persist page_classifications for tech/commercial filtering
+    SCHEMA_VERSION = 11  # v11: isolate candidate/result rows by analysis dimension
 
     def __init__(self, cache_dir: str, config: Optional[DetectionConfig] = None):
         """
@@ -139,6 +139,9 @@ class DocumentCache:
             # v10 迁移：保存技术标/商务标页分类
             if current_version < 10:
                 self._migrate_v10(cursor)
+            # v11 迁移：候选对/分析结果按技术标、商务标隔离
+            if current_version < 11:
+                self._migrate_v11(cursor)
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (self.SCHEMA_VERSION,)
@@ -292,6 +295,53 @@ class DocumentCache:
         except Exception:
             pass
 
+    def _migrate_v11(self, cursor):
+        """v11 迁移：candidate_pairs / pairwise_results 增加维度隔离。
+
+        技术标和商务标共用同一个 batch 文档特征缓存，但候选对 processed 状态
+        和 pairwise 结果必须按维度独立，否则技术标跑完后商务标会被误判为
+        “候选对已处理”而跳过 Phase 3。
+        """
+        try:
+            cursor.execute("ALTER TABLE pairwise_results ADD COLUMN dimension TEXT DEFAULT 'all'")
+        except Exception:
+            pass
+
+        # candidate_pairs 旧表存在 UNIQUE(doc_a_id, doc_b_id)，会阻止同一对文档
+        # 同时保存 technical/commercial 两条候选，因此需要重建表。
+        cursor.execute("ALTER TABLE candidate_pairs RENAME TO candidate_pairs_old")
+        cursor.execute("""
+            CREATE TABLE candidate_pairs (
+                pair_id TEXT PRIMARY KEY,
+                dimension TEXT DEFAULT 'all',
+                doc_a_id TEXT NOT NULL,
+                doc_b_id TEXT NOT NULL,
+                selection_method TEXT DEFAULT '',
+                doc_level_similarity REAL DEFAULT 0.0,
+                processed INTEGER DEFAULT 0,
+                UNIQUE(dimension, doc_a_id, doc_b_id)
+            )
+        """)
+        cursor.execute("""
+            INSERT OR IGNORE INTO candidate_pairs (
+                pair_id, dimension, doc_a_id, doc_b_id,
+                selection_method, doc_level_similarity, processed
+            )
+            SELECT pair_id, 'all', doc_a_id, doc_b_id,
+                   selection_method, doc_level_similarity, processed
+            FROM candidate_pairs_old
+        """)
+        cursor.execute("DROP TABLE candidate_pairs_old")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidate_pairs_dimension_processed "
+            "ON candidate_pairs(dimension, processed)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pairwise_results_dimension "
+            "ON pairwise_results(dimension)"
+        )
+        logger.info("v11 模式迁移完成：候选对/结果按维度隔离")
+
     def _create_tables(self, cursor):
         """创建所有表"""
         # 文档注册表
@@ -363,12 +413,13 @@ class DocumentCache:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS candidate_pairs (
                 pair_id TEXT PRIMARY KEY,
+                dimension TEXT DEFAULT 'all',
                 doc_a_id TEXT NOT NULL,
                 doc_b_id TEXT NOT NULL,
                 selection_method TEXT DEFAULT '',
                 doc_level_similarity REAL DEFAULT 0.0,
                 processed INTEGER DEFAULT 0,
-                UNIQUE(doc_a_id, doc_b_id)
+                UNIQUE(dimension, doc_a_id, doc_b_id)
             )
         """)
 
@@ -376,6 +427,7 @@ class DocumentCache:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pairwise_results (
                 pair_id TEXT PRIMARY KEY,
+                dimension TEXT DEFAULT 'all',
                 doc_a_id TEXT NOT NULL,
                 doc_b_id TEXT NOT NULL,
                 text_similarity REAL DEFAULT 0.0,
@@ -430,6 +482,13 @@ class DocumentCache:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraphs_doc ON paragraphs(doc_id, para_index)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraphs_chunk ON paragraphs(chunk_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_candidate_pairs_processed ON candidate_pairs(processed)")
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_candidate_pairs_dimension_processed ON candidate_pairs(dimension, processed)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairwise_results_dimension ON pairwise_results(dimension)")
+        except sqlite3.OperationalError:
+            # 旧库会先执行 _create_tables 再执行 v11 migration，此时 dimension
+            # 列尚未存在；迁移函数会在加列/重建表后补建索引。
+            pass
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paragraph_matches_pair ON paragraph_matches(pair_id)")
         self._create_text_embedding_cache_schema(cursor)
 
@@ -1240,45 +1299,60 @@ class DocumentCache:
         Args:
             pairs: [(doc_a_id, doc_b_id, method, similarity), ...]
         """
+        dimension = self._analysis_dimension()
         with self.transaction() as conn:
             rows = [
-                ("::".join(sorted([doc_a_id, doc_b_id])),
-                 doc_a_id, doc_b_id, method, similarity)
+                (self._dimension_pair_id(doc_a_id, doc_b_id, dimension),
+                 dimension, doc_a_id, doc_b_id, method, similarity)
                 for doc_a_id, doc_b_id, method, similarity in pairs
             ]
             conn.executemany("""
                 INSERT OR IGNORE INTO candidate_pairs (
-                    pair_id, doc_a_id, doc_b_id, selection_method, doc_level_similarity
-                ) VALUES (?, ?, ?, ?, ?)
+                    pair_id, dimension, doc_a_id, doc_b_id,
+                    selection_method, doc_level_similarity
+                ) VALUES (?, ?, ?, ?, ?, ?)
             """, rows)
 
     def get_unprocessed_pairs(self, limit: int = 0) -> List[Tuple[str, str]]:
         """获取尚未分析的候选对"""
         cursor = self.conn.cursor()
-        query = "SELECT doc_a_id, doc_b_id FROM candidate_pairs WHERE processed = 0"
+        dimension = self._analysis_dimension()
+        query = (
+            "SELECT doc_a_id, doc_b_id FROM candidate_pairs "
+            "WHERE processed = 0 AND dimension = ?"
+        )
         if limit > 0:
             query += f" LIMIT {limit}"
-        cursor.execute(query)
+        cursor.execute(query, (dimension,))
         return [(row[0], row[1]) for row in cursor.fetchall()]
 
     def mark_pair_processed(self, doc_a_id: str, doc_b_id: str) -> None:
         """标记候选对为已处理（不单独 commit，由调用方批量提交）"""
-        pair_id = "::".join(sorted([doc_a_id, doc_b_id]))
+        dimension = self._analysis_dimension()
+        pair_id = self._dimension_pair_id(doc_a_id, doc_b_id, dimension)
         self.conn.execute(
-            "UPDATE candidate_pairs SET processed = 1 WHERE pair_id = ?",
-            (pair_id,)
+            "UPDATE candidate_pairs SET processed = 1 "
+            "WHERE pair_id = ? AND dimension = ?",
+            (pair_id, dimension)
         )
 
     def get_total_candidate_pairs(self) -> int:
         """获取候选对总数"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM candidate_pairs")
+        cursor.execute(
+            "SELECT COUNT(*) FROM candidate_pairs WHERE dimension = ?",
+            (self._analysis_dimension(),)
+        )
         return cursor.fetchone()[0]
 
     def get_processed_pair_count(self) -> int:
         """获取已处理候选对数"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM candidate_pairs WHERE processed = 1")
+        cursor.execute(
+            "SELECT COUNT(*) FROM candidate_pairs "
+            "WHERE processed = 1 AND dimension = ?",
+            (self._analysis_dimension(),)
+        )
         return cursor.fetchone()[0]
 
     # ================================================================
@@ -1289,6 +1363,8 @@ class DocumentCache:
         """存储单个分析结果"""
         evidence = result.evidence
         text_ev = evidence.text_evidence
+        dimension = self._analysis_dimension()
+        db_pair_id = self._dimension_pair_id(result.doc_a_id, result.doc_b_id, dimension)
 
         ie = evidence.image_evidence
         evidence_json = json.dumps({
@@ -1330,15 +1406,17 @@ class DocumentCache:
         }, ensure_ascii=False)
 
         with self.transaction() as conn:
+            conn.execute("DELETE FROM paragraph_matches WHERE pair_id = ?", (db_pair_id,))
             conn.execute("""
                 INSERT OR REPLACE INTO pairwise_results (
-                    pair_id, doc_a_id, doc_b_id,
+                    pair_id, dimension, doc_a_id, doc_b_id,
                     text_similarity, risk_level, risk_score,
                     risk_factors_json, match_count, clone_block_count,
                     metadata_match_count, image_match_count, evidence_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                result.pair_id,
+                db_pair_id,
+                dimension,
                 result.doc_a_id,
                 result.doc_b_id,
                 result.similarity_scores.get('text_local', 0),
@@ -1356,7 +1434,7 @@ class DocumentCache:
             if text_ev.paragraph_matches:
                 match_rows = [
                     (
-                        result.pair_id,
+                        db_pair_id,
                         match.get('similarity', 0),
                         match.get('paragraph_a_index', 0),
                         match.get('paragraph_b_index', 0),
@@ -1384,15 +1462,25 @@ class DocumentCache:
         cursor = self.conn.cursor()
 
         # 加载配对结果
-        cursor.execute("SELECT * FROM pairwise_results ORDER BY risk_score DESC")
+        dimension = self._analysis_dimension()
+        cursor.execute(
+            "SELECT pair_id, dimension, doc_a_id, doc_b_id, text_similarity, "
+            "risk_level, risk_score, risk_factors_json, match_count, "
+            "clone_block_count, metadata_match_count, image_match_count, "
+            "evidence_json, processed_at "
+            "FROM pairwise_results WHERE dimension = ? "
+            "ORDER BY risk_score DESC",
+            (dimension,)
+        )
         for row in cursor.fetchall():
             cols = [
-                'pair_id', 'doc_a_id', 'doc_b_id', 'text_similarity',
+                'pair_id', 'dimension', 'doc_a_id', 'doc_b_id', 'text_similarity',
                 'risk_level', 'risk_score', 'risk_factors_json',
                 'match_count', 'clone_block_count', 'metadata_match_count',
                 'image_match_count', 'evidence_json', 'processed_at'
             ]
             data = dict(zip(cols, row))
+            report_pair_id = self._base_pair_id_from_db(data['pair_id'], data['dimension'])
 
             # 加载段落匹配
             cursor2 = self.conn.cursor()
@@ -1464,7 +1552,7 @@ class DocumentCache:
             )
 
             results.append(PairwiseResult(
-                pair_id=data['pair_id'],
+                pair_id=report_pair_id,
                 doc_a_id=data['doc_a_id'],
                 doc_b_id=data['doc_b_id'],
                 similarity_scores={'text_local': data['text_similarity'] or 0.0},
@@ -1491,6 +1579,28 @@ class DocumentCache:
     # ================================================================
     # 辅助方法
     # ================================================================
+
+    def _analysis_dimension(self) -> str:
+        """当前分析维度，用于隔离技术标/商务标的候选和结果状态。"""
+        dimension = getattr(self.config, 'ANALYSIS_DIMENSION', 'all') if self.config else 'all'
+        if dimension in ('technical', 'commercial'):
+            return dimension
+        return 'all'
+
+    @staticmethod
+    def _base_pair_id(doc_a_id: str, doc_b_id: str) -> str:
+        return "::".join(sorted([doc_a_id, doc_b_id]))
+
+    def _dimension_pair_id(self, doc_a_id: str, doc_b_id: str, dimension: str = None) -> str:
+        dim = dimension or self._analysis_dimension()
+        return f"{dim}::{self._base_pair_id(doc_a_id, doc_b_id)}"
+
+    @staticmethod
+    def _base_pair_id_from_db(pair_id: str, dimension: str = '') -> str:
+        prefix = f"{dimension}::" if dimension else ''
+        if prefix and pair_id.startswith(prefix):
+            return pair_id[len(prefix):]
+        return pair_id
 
     @staticmethod
     def _chunk_id(doc_id: str, chunk_index: int) -> str:

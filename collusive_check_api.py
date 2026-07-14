@@ -70,6 +70,145 @@ os.makedirs(WORK_DIR, exist_ok=True)
 _global_sbert_model = None
 _text_cache_locks: Dict[int, threading.Lock] = {}
 _text_cache_locks_guard = threading.Lock()
+_cleanup_lock = threading.Lock()
+_last_cleanup_ts = 0.0
+_active_batches: set[int] = set()
+_active_batches_lock = threading.Lock()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning(f"{name} 配置无效，使用默认值 {default}")
+        return default
+
+
+def _safe_rmtree(path: str, root: str) -> bool:
+    """只删除 root 下的子目录，避免路径计算错误造成误删。"""
+    abs_root = os.path.abspath(root)
+    abs_path = os.path.abspath(path)
+    try:
+        common = os.path.commonpath([abs_root, abs_path])
+    except ValueError:
+        return False
+    if common != abs_root or abs_path == abs_root:
+        logger.warning(f"跳过不安全清理路径: {abs_path}")
+        return False
+    shutil.rmtree(abs_path, ignore_errors=True)
+    return True
+
+
+def _cleanup_child_dirs(
+    root: str,
+    retention_days: int,
+    skip_names: set[str],
+    name_prefix: str = "",
+) -> int:
+    """删除 root 下超过保留期的一级子目录。"""
+    if retention_days <= 0 or not os.path.isdir(root):
+        return 0
+    cutoff = time.time() - retention_days * 86400
+    removed = 0
+    for name in os.listdir(root):
+        if name in skip_names:
+            continue
+        if name_prefix and not name.startswith(name_prefix):
+            continue
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            if os.path.getmtime(path) >= cutoff:
+                continue
+            if _safe_rmtree(path, root):
+                removed += 1
+                logger.info(f"清理过期目录: {path}")
+        except Exception as e:
+            logger.warning(f"清理目录失败 {path}: {e}")
+    return removed
+
+
+def _run_retention_cleanup(force: bool = False, skip_batch_id: Optional[int] = None) -> None:
+    """轻量清理下载缓存和管线工作目录。
+
+    - 启动时可强制执行一次；
+    - 请求前按 COLLUSIVE_CLEANUP_INTERVAL_SECONDS 控制扫描频率；
+    - 正在执行的 batch 和当前请求 batch 始终跳过。
+    """
+    if not _env_bool("COLLUSIVE_CLEANUP_ENABLED", True):
+        return
+
+    interval = max(60, _env_int("COLLUSIVE_CLEANUP_INTERVAL_SECONDS", 3600))
+    global _last_cleanup_ts
+    now = time.time()
+    if not force and now - _last_cleanup_ts < interval:
+        return
+
+    if not _cleanup_lock.acquire(blocking=False):
+        return
+    try:
+        now = time.time()
+        if not force and now - _last_cleanup_ts < interval:
+            return
+        _last_cleanup_ts = now
+
+        with _active_batches_lock:
+            active_batches = set(_active_batches)
+        if skip_batch_id is not None:
+            active_batches.add(skip_batch_id)
+
+        skip_downloads = {str(batch_id) for batch_id in active_batches}
+        skip_workdirs = {f"batch_{batch_id}" for batch_id in active_batches}
+        # 稳定工作目录关闭时会产生 batch_{id}_{suffix}，同样跳过活跃批次前缀。
+        for batch_id in active_batches:
+            skip_workdirs.add(f"batch_{batch_id}_")
+
+        download_days = _env_int("COLLUSIVE_DOWNLOAD_RETENTION_DAYS", 30)
+        workdir_days = _env_int("COLLUSIVE_WORKDIR_RETENTION_DAYS", 7)
+
+        removed_downloads = _cleanup_child_dirs(
+            DOWNLOAD_BASE, download_days, skip_downloads
+        )
+
+        removed_workdirs = 0
+        if workdir_days > 0 and os.path.isdir(WORK_DIR):
+            cutoff = time.time() - workdir_days * 86400
+            for name in os.listdir(WORK_DIR):
+                if not name.startswith("batch_"):
+                    continue
+                if name in skip_workdirs:
+                    continue
+                if any(name.startswith(prefix) for prefix in skip_workdirs if prefix.endswith("_")):
+                    continue
+                path = os.path.join(WORK_DIR, name)
+                if not os.path.isdir(path):
+                    continue
+                try:
+                    if os.path.getmtime(path) >= cutoff:
+                        continue
+                    if _safe_rmtree(path, WORK_DIR):
+                        removed_workdirs += 1
+                        logger.info(f"清理过期目录: {path}")
+                except Exception as e:
+                    logger.warning(f"清理目录失败 {path}: {e}")
+
+        if removed_downloads or removed_workdirs:
+            logger.info(
+                "缓存清理完成: "
+                f"downloads={removed_downloads}, workdirs={removed_workdirs}, "
+                f"downloadRetentionDays={download_days}, "
+                f"workdirRetentionDays={workdir_days}"
+            )
+    finally:
+        _cleanup_lock.release()
 
 # ============================================================
 # itemCode → 检查项名称映射
@@ -976,6 +1115,7 @@ def _run_full_pipeline(
         tech_img_count = 0
         com_img_count = 0
         image_pair_summaries = []
+        matched_image_count = len(ie.matched_image_pairs)
         for img_pair in ie.matched_image_pairs:
             dim = img_pair.get("_dimension_tag", "unknown")
             if dim in ("tech_image", "tech_image+com_image"):
@@ -988,18 +1128,15 @@ def _run_full_pipeline(
                 # TODO: 替换为真实的图片访问 URL
                 IMAGE_BASE_URL = "https://example.com/files"
                 image_pair_summaries.append({
-                    "source_a": source_a,
-                    "source_b": source_b,
                     "page_a": img_pair.get("page_a", -1),
                     "page_b": img_pair.get("page_b", -1),
                     "confidence": round(img_pair.get("confidence", 0.0), 4),
-                    "phash_dist": img_pair.get("phash_dist", -1),
                     "image_url_a": f"{IMAGE_BASE_URL}/{source_a}" if source_a else "",
                     "image_url_b": f"{IMAGE_BASE_URL}/{source_b}" if source_b else "",
                 })
 
         image_results[pair_key] = {
-            "total_image_matches": ie.common_image_count,
+            "total_image_matches": matched_image_count,
             "tech_image_matches": tech_img_count,
             "com_image_matches": com_img_count,
             "has_tech_image": tech_img_count > 0,
@@ -1050,7 +1187,7 @@ def _get_company_results_from_pipeline(
 
     evidence 字段包含详细证据：
     - 文本相似: similarParagraphs（段落内容 + 相似度 + 公司ID）
-    - 图片相似: similarImages（图片引用、页码、尺寸、缩略图 data URI、置信度 + 公司ID）
+    - 图片相似: similarImages（页码、图片访问地址、置信度 + 公司ID）
     """
     text_results = pipeline_result.get("text_results", {})
     image_results = pipeline_result.get("image_results", {})
@@ -1096,29 +1233,15 @@ def _get_company_results_from_pipeline(
                 "imageMatchCount": ir.get("total_image_matches", 0),
                 "similarImages": img_pairs,
             })
-            # 对公司 B：swap a↔b，使 source_a 指向 B 自己的图（被检测方），
-            # source_b 指向 A 的图（对比方）
+            # 对公司 B：交换 A/B 视角，保持返回字段与 A 公司一致。
             swapped_pairs = []
             for ip in img_pairs:
                 swapped_pairs.append({
-                    "source_a": ip.get("source_b", ""),
-                    "source_b": ip.get("source_a", ""),
                     "page_a": ip.get("page_b", -1),
                     "page_b": ip.get("page_a", -1),
-                    "width_a": ip.get("width_b", 0),
-                    "height_a": ip.get("height_b", 0),
-                    "width_b": ip.get("width_a", 0),
-                    "height_b": ip.get("height_a", 0),
                     "confidence": ip.get("confidence", 0.0),
-                    "phash_dist": ip.get("phash_dist", -1),
-                    "dhash_dist": ip.get("dhash_dist", -1),
-                    "orb_match_ratio": ip.get("orb_match_ratio", 0.0),
-                    "histogram_correlation": ip.get("histogram_correlation", 0.0),
-                    "reasons": ip.get("reasons", []),
-                    "thumbnail_base64_a": ip.get("thumbnail_base64_b", ""),
-                    "thumbnail_base64_b": ip.get("thumbnail_base64_a", ""),
-                    "ocr_text_a": ip.get("ocr_text_b", ""),
-                    "ocr_text_b": ip.get("ocr_text_a", ""),
+                    "image_url_a": ip.get("image_url_b", ""),
+                    "image_url_b": ip.get("image_url_a", ""),
                 })
             company_evidence[b]["image_details"].append({
                 "companyRecordId": a,
@@ -1254,6 +1377,9 @@ def _run_analysis_sync(request: AnalyzeRequest) -> AnalyzeResponse:
         f"({len(companies)} 家公司, traceId={trace_id})"
     )
 
+    with _active_batches_lock:
+        _active_batches.add(batch_id)
+
     try:
         # 1. 下载 PDF
         pdf_paths = download_batch_pdfs(batch_id, companies)
@@ -1334,6 +1460,9 @@ def _run_analysis_sync(request: AnalyzeRequest) -> AnalyzeResponse:
         return _build_error_response(
             request, str(e), stage="api_dispatch", trace_id=trace_id
         )
+    finally:
+        with _active_batches_lock:
+            _active_batches.discard(batch_id)
 
 
 # ============================================================
@@ -1364,6 +1493,7 @@ async def startup_event():
     """启动时确保目录存在 + 预加载模型"""
     os.makedirs(DOWNLOAD_BASE, exist_ok=True)
     os.makedirs(WORK_DIR, exist_ok=True)
+    _run_retention_cleanup(force=True)
     logger.info("围标串标 API 服务启动")
     logger.info(f"  PDF 下载目录: {DOWNLOAD_BASE}")
     logger.info(f"  管线工作目录: {WORK_DIR}")
@@ -1448,6 +1578,8 @@ async def analyze_item(request: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(status_code=400, detail="companies 不能为空")
     if len(request.companies) < 2 and item_code in HEAVY_ITEMS:
         raise HTTPException(status_code=400, detail="此检查项至少需要 2 家公司")
+
+    _run_retention_cleanup(skip_batch_id=request.batchId)
 
     trace_id = uuid.uuid4().hex[:12]
     future = _executor.submit(_run_analysis_sync, request)

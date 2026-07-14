@@ -288,12 +288,11 @@ py/AI 返回当前检查项下每家公司的检查结论。
       "imageMatchCount": 3,
       "similarImages": [
         {
-          "source_a": "page5_img0.png",
-          "source_b": "page3_img0.png",
           "page_a": 5,
           "page_b": 3,
           "confidence": 0.92,
-          "phash_dist": 2
+          "image_url_a": "https://example.com/files/page_5",
+          "image_url_b": "https://example.com/files/page_3"
         }
       ]
     }
@@ -316,12 +315,11 @@ py/AI 返回当前检查项下每家公司的检查结论。
 | `similarImages[].companyRecordId` | 对方公司记录 ID。 |
 | `similarImages[].imageMatchCount` | 匹配图片总数。 |
 | `similarImages[].similarImages` | 相似图片对列表（最多 20 对）。 |
-| `similarImages[].similarImages[].source_a` | **被检测方**（当前公司）的图片引用。 |
-| `similarImages[].similarImages[].source_b` | **对比方**（与之对比后发现相似的公司）的图片引用。 |
 | `similarImages[].similarImages[].page_a` | 被检测方图片所在页码。 |
 | `similarImages[].similarImages[].page_b` | 对比方图片所在页码。 |
 | `similarImages[].similarImages[].confidence` | 匹配置信度（0~1）。 |
-| `similarImages[].similarImages[].phash_dist` | 感知哈希距离，越小越相似。 |
+| `similarImages[].similarImages[].image_url_a` | 被检测方图片访问地址。 |
+| `similarImages[].similarImages[].image_url_b` | 对比方图片访问地址。 |
 
 ## 10. 异常处理规则
 

@@ -15,6 +15,9 @@ import os
 import glob
 import logging
 import time
+import hashlib
+import re
+from collections import defaultdict
 from datetime import datetime
 from typing import List, Dict
 from concurrent.futures import (
@@ -285,6 +288,7 @@ class BidDetectionOrchestrator:
 
             if state.phase < 5:
                 logger.info("Phase 3: 精细分析...")
+                self._prepare_batch_template_hashes()
                 completed_ids = self.checkpoint.load_phase3_progress()
                 state.completed_pair_ids = completed_ids
                 all_pairs = self.cache.get_unprocessed_pairs()
@@ -999,6 +1003,68 @@ class BidDetectionOrchestrator:
             else:
                 filtered.append(h)
         return filtered
+
+    def _prepare_batch_template_hashes(self) -> None:
+        """按当前维度统计批次内高频段落，用于降低模板语误报。
+
+        只统计同一维度内的段落 hash。技术标/商务标独立运行时，模板集合
+        互不污染。出现文档数达到阈值的段落会写入 config，供多进程 worker
+        序列化使用。
+        """
+        if not getattr(self.config, 'BID_TEMPLATE_HARD_FILTER', True):
+            return
+
+        features = self._all_features_cache or self.cache.load_all_documents()
+        doc_count = len(features)
+        if doc_count < 2:
+            self.config.BID_TEMPLATE_TEXT_HASHES = []
+            return
+
+        min_docs = max(
+            int(getattr(self.config, 'BID_TEMPLATE_BATCH_MIN_DOCS', 3)),
+            int(doc_count * getattr(self.config, 'BID_TEMPLATE_BATCH_DOC_RATIO', 0.30) + 0.999),
+        )
+        if doc_count == 2:
+            # 两家公司场景缺少批次频率统计意义，交给模板比例/信息量过滤。
+            min_docs = 3
+
+        dimension = self.config.ANALYSIS_DIMENSION
+        doc_freq = defaultdict(set)
+        for feat in features:
+            try:
+                para_full = self.cache.load_all_paragraphs_full(feat.doc_id)
+                pages = getattr(feat, 'page_classifications', {}) or {}
+                for info in para_full.values():
+                    if dimension in ("technical", "commercial"):
+                        page_num = info.get('page_num', -1)
+                        if pages.get(page_num, 'unknown') != dimension:
+                            continue
+                    norm = self._normalize_template_text(info.get('text', ''))
+                    if not norm or len(norm) < 12:
+                        continue
+                    text_hash = hashlib.md5(norm.encode('utf-8')).hexdigest()
+                    doc_freq[text_hash].add(feat.doc_id)
+            except Exception as e:
+                logger.warning(f"批次模板统计跳过文档 {feat.filename}: {e}")
+
+        common_hashes = [
+            h for h, doc_ids in doc_freq.items()
+            if len(doc_ids) >= min_docs
+        ]
+        self.config.BID_TEMPLATE_TEXT_HASHES = common_hashes
+        if common_hashes:
+            logger.info(
+                f"Phase 3: 批次高频模板段落 {len(common_hashes)} 条 "
+                f"(doc_count={doc_count}, min_docs={min_docs}, dimension={dimension})"
+            )
+
+    @staticmethod
+    def _normalize_template_text(text: str) -> str:
+        text = re.sub(r"\s+", "", text or "")
+        text = re.sub(r"\d+(?:\.\d+)?", "#", text)
+        text = re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9_.+-]+", "EMAIL", text)
+        text = re.sub(r"1[3-9]\d{9}", "PHONE", text)
+        return text[:500]
 
     def _phase3_analyze_single(self, doc_a_id: str, doc_b_id: str):
         doc_a = self.cache.load_document(doc_a_id)

@@ -163,6 +163,7 @@ class CheckpointManager:
         }
         # 仅对影响检测结果的参数进行哈希
         relevant_keys = [
+            'ANALYSIS_DIMENSION',
             'TEXT_GLOBAL_THRESHOLD', 'TEXT_LOCAL_THRESHOLD',
             'SBERT_BASE_THRESHOLD', 'SBERT_SHORT_PARAGRAPH_THRESHOLD',
             'MINHASH_LSH_THRESHOLD', 'PARAGRAPH_LSH_THRESHOLD',
