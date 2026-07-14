@@ -8,7 +8,8 @@
 #   3. pip install -r deploy/requirements.gpu.txt
 # ============================================================
 
-# OCR — PaddleOCR 3.x (PP-OCRv6)
+# OCR — 默认 RapidOCR ONNX Runtime；PaddleOCR 作为可选 GPU 备选
+rapidocr-onnxruntime>=1.2.0
 # paddlepaddle-gpu 需先单独安装 (见 setup_server_gpu.sh)
 paddleocr>=3.5.0
 
