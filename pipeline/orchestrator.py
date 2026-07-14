@@ -1288,7 +1288,7 @@ class BidDetectionOrchestrator:
     @staticmethod
     def _empty_report() -> GlobalReport:
         return GlobalReport(
-            report_id="empty", high_risk_pairs=0,
+            report_id="empty",
             generated_at=datetime.now().isoformat(),
             total_files=0, total_pairs=0, candidate_pairs=0,
             suspicious_pairs=0,

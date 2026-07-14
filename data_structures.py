@@ -307,7 +307,6 @@ class GlobalReport:
     total_pairs: int
     candidate_pairs: int
     suspicious_pairs: int
-    high_risk_pairs: int
     risk_clusters: List[Cluster] = field(default_factory=list)
     pairwise_results: List[PairwiseResult] = field(default_factory=list)
     metadata_groups: List[MetadataGroup] = field(default_factory=list)  # ★ 元数据聚合组

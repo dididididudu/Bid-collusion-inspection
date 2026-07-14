@@ -49,7 +49,6 @@ class RiskScoringEngine:
             total_pairs=len(features) * (len(features) - 1) // 2,
             candidate_pairs=len(pairwise_results),
             suspicious_pairs=len(suspicious_pairs),
-            high_risk_pairs=0,
             risk_clusters=risk_clusters,
             metadata_groups=metadata_groups,  # ★
             pairwise_results=pairwise_results,

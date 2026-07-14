@@ -114,7 +114,7 @@ class DetectionConfig:
     TIME_BUCKET_FORMAT: str = "%Y-%m-%dT%H"
 
     # ── OCR ──
-    ENABLE_OCR: bool = False
+    ENABLE_OCR: bool = True
     ENABLE_IMAGE_ANALYSIS: bool = True
     OCR_ENGINE: str = "rapidocr"       # RapidOCR(ONNX Runtime) CPU 更轻更快，默认启用
     OCR_LANGUAGES: list = None

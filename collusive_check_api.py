@@ -39,6 +39,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from utils.error_reporter import record_error
+
 # ── 项目路径 ──
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
@@ -66,6 +68,8 @@ os.makedirs(WORK_DIR, exist_ok=True)
 
 # 全局 SBERT 模型（只读，线程安全，startup 时加载，供 _run_full_pipeline 注入）
 _global_sbert_model = None
+_text_cache_locks: Dict[int, threading.Lock] = {}
+_text_cache_locks_guard = threading.Lock()
 
 # ============================================================
 # itemCode → 检查项名称映射
@@ -259,10 +263,35 @@ def download_batch_pdfs(batch_id: int, companies: List[CompanyInfo]) -> Dict[int
     )
     logger.info(f"[batch={batch_id}] PDF 下载并发: workers={download_workers}, files={len(companies)}")
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    company_by_future = {}
     with ThreadPoolExecutor(max_workers=download_workers) as executor:
-        futures = [executor.submit(_download_one, company) for company in companies]
+        futures = []
+        for company in companies:
+            future = executor.submit(_download_one, company)
+            futures.append(future)
+            company_by_future[future] = company
         for future in as_completed(futures):
-            record_id, local_path, err = future.result()
+            company = company_by_future.get(future)
+            try:
+                record_id, local_path, err = future.result()
+            except Exception as e:
+                record_id = company.companyRecordId if company else -1
+                err = f"公司 {company.bidderName if company else record_id} PDF 下载异常: {e}"
+                local_path = ""
+                logger.error(err, exc_info=True)
+                if company is not None:
+                    record_error(
+                        work_dir=WORK_DIR,
+                        batch_id=batch_id,
+                        item_code="",
+                        stage="pdf_download",
+                        error=e,
+                        company_record_id=company.companyRecordId,
+                        registration_company_id=company.registrationCompanyId,
+                        section_id=company.sectionId,
+                        filename=os.path.basename(company.bidFileUrl or ""),
+                        extra={"url": company.bidFileUrl},
+                    )
             if err:
                 errors.append(err)
             elif local_path:
@@ -392,6 +421,16 @@ def _get_batch_work_dirs(batch_id: int, dimension: str = "") -> Dict[str, str]:
     }
 
 
+def _get_text_cache_lock(batch_id: int) -> threading.Lock:
+    """同 batch 文本缓存预热串行化，避免轻量项并发重复写 SQLite。"""
+    with _text_cache_locks_guard:
+        lock = _text_cache_locks.get(batch_id)
+        if lock is None:
+            lock = threading.Lock()
+            _text_cache_locks[batch_id] = lock
+        return lock
+
+
 def _copy_batch_inputs(
     batch_id: int,
     companies: List[CompanyInfo],
@@ -450,32 +489,37 @@ def _warm_text_cache(
     """
     from pipeline.orchestrator import BidDetectionOrchestrator
 
-    dirs = _get_batch_work_dirs(batch_id, "text")
-    os.makedirs(dirs["output_dir"], exist_ok=True)
-    doc_id_map = _copy_batch_inputs(batch_id, companies, pdf_paths, dirs["input_dir"])
+    lock = _get_text_cache_lock(batch_id)
+    with lock:
+        dirs = _get_batch_work_dirs(batch_id, "text")
+        os.makedirs(dirs["output_dir"], exist_ok=True)
+        doc_id_map = _copy_batch_inputs(batch_id, companies, pdf_paths, dirs["input_dir"])
 
-    config = _build_pipeline_config(dirs["cache_dir"], dirs["ckpt_dir"], "all")
-    config.ENABLE_OCR = False
-    config.ENABLE_IMAGE_ANALYSIS = False
-    config.ENABLE_CHECKPOINT = False
-    config.ENABLED_DIMENSIONS['content_similarity'] = False
+        config = _build_pipeline_config(dirs["cache_dir"], dirs["ckpt_dir"], "all")
+        config.ENABLE_OCR = False
+        config.ENABLE_IMAGE_ANALYSIS = False
+        config.ENABLE_CHECKPOINT = False
+        config.ENABLED_DIMENSIONS['content_similarity'] = False
 
-    orchestrator = BidDetectionOrchestrator(config)
-    try:
-        file_paths = [
-            os.path.join(dirs["input_dir"], f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf")
-            for c in companies
-            if c.companyRecordId in doc_id_map
-        ]
-        orchestrator._phase0_metadata(file_paths)
-        for file_path in file_paths:
-            orchestrator._phase1_extract_single(file_path)
-        orchestrator.cache.conn.commit()
-        logger.info(f"[batch={batch_id}] 文本缓存预热完成: {len(file_paths)} 个文件")
-    finally:
-        orchestrator.streaming.clear()
-        orchestrator.cache.close()
-    return doc_id_map
+        orchestrator = BidDetectionOrchestrator(config)
+        try:
+            file_paths = [
+                os.path.join(dirs["input_dir"], f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf")
+                for c in companies
+                if c.companyRecordId in doc_id_map
+            ]
+            orchestrator._phase0_metadata(file_paths)
+            for file_path in file_paths:
+                orchestrator._phase1_extract_single(file_path)
+            orchestrator.cache.conn.commit()
+            logger.info(
+                f"[batch={batch_id}] 文本缓存预热完成/复用: "
+                f"{len(file_paths)} 个文件, cache={dirs['cache_dir']}"
+            )
+        finally:
+            orchestrator.streaming.clear()
+            orchestrator.cache.close()
+        return doc_id_map
 
 
 def handle_file_code_similar(
@@ -610,7 +654,7 @@ def handle_bidder_name_similar(
 
     对应 itemCode: SAME_bidderName_SIMILAR
     """
-    from extraction.contact_extractor import extract_contacts_from_sqlite, extract_contacts_from_text
+    from extraction.contact_extractor import ContactFingerprint, extract_contacts_from_sqlite, extract_contacts_from_text
     from extraction.feature_cache import DocumentCache
 
     company_name_in_docs: Dict[int, List[str]] = {}
@@ -623,7 +667,12 @@ def handle_bidder_name_similar(
         for c in companies:
             doc_id = doc_id_map.get(c.companyRecordId)
             if cache is not None and doc_id:
-                ci = extract_contacts_from_sqlite(doc_id, cache)
+                cached_fp = cache.load_contact_fingerprint(doc_id)
+                if cached_fp:
+                    ci = ContactFingerprint(**cached_fp)
+                else:
+                    ci = extract_contacts_from_sqlite(doc_id, cache)
+                    cache.store_contact_fingerprint(doc_id, ci.to_json())
                 company_name_in_docs[c.companyRecordId] = ci.company_names
                 continue
             path = pdf_paths.get(c.companyRecordId)
@@ -679,7 +728,7 @@ def handle_same_bid_contact_similar(
     batch_id: int = 0,
 ) -> List[CompanyResult]:
     """同标段单位联系人雷同 — 检查人名、手机号、邮箱跨公司雷同"""
-    from extraction.contact_extractor import extract_contacts_from_sqlite, extract_contacts_from_text
+    from extraction.contact_extractor import ContactFingerprint, extract_contacts_from_sqlite, extract_contacts_from_text
     from extraction.feature_cache import DocumentCache
 
     contacts = {}
@@ -692,7 +741,13 @@ def handle_same_bid_contact_similar(
         for c in companies:
             doc_id = doc_id_map.get(c.companyRecordId)
             if cache is not None and doc_id:
-                contacts[c.companyRecordId] = extract_contacts_from_sqlite(doc_id, cache)
+                cached_fp = cache.load_contact_fingerprint(doc_id)
+                if cached_fp:
+                    contacts[c.companyRecordId] = ContactFingerprint(**cached_fp)
+                else:
+                    ci = extract_contacts_from_sqlite(doc_id, cache)
+                    cache.store_contact_fingerprint(doc_id, ci.to_json())
+                    contacts[c.companyRecordId] = ci
                 continue
             path = pdf_paths.get(c.companyRecordId)
             if path and os.path.exists(path):
@@ -1050,8 +1105,20 @@ def _get_company_results_from_pipeline(
                     "source_b": ip.get("source_a", ""),
                     "page_a": ip.get("page_b", -1),
                     "page_b": ip.get("page_a", -1),
+                    "width_a": ip.get("width_b", 0),
+                    "height_a": ip.get("height_b", 0),
+                    "width_b": ip.get("width_a", 0),
+                    "height_b": ip.get("height_a", 0),
                     "confidence": ip.get("confidence", 0.0),
                     "phash_dist": ip.get("phash_dist", -1),
+                    "dhash_dist": ip.get("dhash_dist", -1),
+                    "orb_match_ratio": ip.get("orb_match_ratio", 0.0),
+                    "histogram_correlation": ip.get("histogram_correlation", 0.0),
+                    "reasons": ip.get("reasons", []),
+                    "thumbnail_base64_a": ip.get("thumbnail_base64_b", ""),
+                    "thumbnail_base64_b": ip.get("thumbnail_base64_a", ""),
+                    "ocr_text_a": ip.get("ocr_text_b", ""),
+                    "ocr_text_b": ip.get("ocr_text_a", ""),
                 })
             company_evidence[b]["image_details"].append({
                 "companyRecordId": a,
@@ -1096,34 +1163,60 @@ def _dispatch_handler(
     companies: List[CompanyInfo],
     pdf_paths: Dict[int, str],
     batch_id: int,
+    trace_id: str = "",
 ) -> List[CompanyResult]:
     """根据 itemCode 路由到对应处理器
 
     轻量项（file_id/author/editor/contact/bidderName）：直接 fitz 提取，秒级返回
     重量项（tech/commercial）：走完整管道 + ANALYSIS_DIMENSION 过滤
     """
-    if item_code == "FILE_CODE_SIMILAR":
-        return handle_file_code_similar(companies, pdf_paths)
-    elif item_code == "EDITOR_SIGNER_SIMILAR":
-        return handle_editor_signer_similar(companies, pdf_paths)
-    elif item_code == "DOC_AUTHOR_SIMILAR":
-        return handle_doc_author_similar(companies, pdf_paths)
-    elif item_code == "SAME_BID_CONTACT_SIMILAR":
-        return handle_same_bid_contact_similar(companies, pdf_paths, batch_id)
-    elif item_code == "SAME_bidderName_SIMILAR":
-        return handle_bidder_name_similar(companies, pdf_paths, batch_id)
-    elif item_code in HEAVY_ITEMS:
-        pipeline_result = _run_full_pipeline(
-            batch_id, companies, pdf_paths, item_code=item_code,
+    stage = "dispatch"
+    try:
+        if item_code == "FILE_CODE_SIMILAR":
+            stage = "lightweight_file_code"
+            return handle_file_code_similar(companies, pdf_paths)
+        elif item_code == "EDITOR_SIGNER_SIMILAR":
+            stage = "lightweight_editor"
+            return handle_editor_signer_similar(companies, pdf_paths)
+        elif item_code == "DOC_AUTHOR_SIMILAR":
+            stage = "lightweight_author"
+            return handle_doc_author_similar(companies, pdf_paths)
+        elif item_code == "SAME_BID_CONTACT_SIMILAR":
+            stage = "lightweight_contact"
+            return handle_same_bid_contact_similar(companies, pdf_paths, batch_id)
+        elif item_code == "SAME_bidderName_SIMILAR":
+            stage = "lightweight_bidder_name"
+            return handle_bidder_name_similar(companies, pdf_paths, batch_id)
+        elif item_code in HEAVY_ITEMS:
+            stage = "full_pipeline"
+            pipeline_result = _run_full_pipeline(
+                batch_id, companies, pdf_paths, item_code=item_code,
+            )
+            return _get_company_results_from_pipeline(
+                companies, pipeline_result, item_code,
+            )
+        else:
+            raise ValueError(f"未知的 itemCode: {item_code}")
+    except Exception as e:
+        record_error(
+            work_dir=WORK_DIR,
+            batch_id=batch_id,
+            item_code=item_code,
+            stage=stage,
+            error=e,
+            trace_id=trace_id,
+            extra={"companyCount": len(companies)},
         )
-        return _get_company_results_from_pipeline(
-            companies, pipeline_result, item_code,
-        )
-    else:
-        raise ValueError(f"未知的 itemCode: {item_code}")
+        raise
 
 
-def _build_error_response(request: AnalyzeRequest, error_msg: str) -> AnalyzeResponse:
+def _build_error_response(
+    request: AnalyzeRequest,
+    error_msg: str,
+    *,
+    stage: str = "api",
+    trace_id: str = "",
+) -> AnalyzeResponse:
     """构建错误响应（全公司 ERROR，不阻断后续检查项）"""
     error_results = [
         CompanyResult(
@@ -1132,7 +1225,7 @@ def _build_error_response(request: AnalyzeRequest, error_msg: str) -> AnalyzeRes
             sectionId=c.sectionId,
             status="ERROR",
             summary=f"检查异常: {error_msg}",
-            evidence={"error": error_msg},
+            evidence={"error": error_msg, "stage": stage, "traceId": trace_id},
         ) for c in request.companies
     ]
     return AnalyzeResponse(
@@ -1153,30 +1246,94 @@ def _run_analysis_sync(request: AnalyzeRequest) -> AnalyzeResponse:
     batch_id = request.batchId
     item_code = request.itemCode
     companies = request.companies
+    trace_id = uuid.uuid4().hex[:12]
 
     t0 = time.time()
-    logger.info(f"[batch={batch_id}] 开始检查 {item_code} ({len(companies)} 家公司)")
-
-    # 1. 下载 PDF
-    pdf_paths = download_batch_pdfs(batch_id, companies)
-
-    # 2. 路由到对应 handler
-    results = _dispatch_handler(item_code, companies, pdf_paths, batch_id)
-
-    # 3. 构建响应
-    response = AnalyzeResponse(
-        batchId=batch_id,
-        itemCode=item_code,
-        itemName=ITEM_CODE_NAMES.get(item_code, item_code),
-        results=results,
+    logger.info(
+        f"[batch={batch_id}] 开始检查 {item_code} "
+        f"({len(companies)} 家公司, traceId={trace_id})"
     )
 
-    elapsed = time.time() - t0
-    failed_count = sum(1 for r in results if r.status == "FAILED")
-    logger.info(f"[batch={batch_id}] 完成 — {item_code}, "
-                f"{failed_count}/{len(results)} FAILED, 耗时 {elapsed:.1f}s")
+    try:
+        # 1. 下载 PDF
+        pdf_paths = download_batch_pdfs(batch_id, companies)
 
-    return response
+        # 1.5 识别下载失败的公司。按接口文档，某个检查项调用 py/AI
+        # 失败时，该检查项下所有公司结果写为 ERROR，由 Java 继续调后续检查项。
+        missing_pdf_ids: set = {
+            c.companyRecordId for c in companies
+            if c.companyRecordId not in pdf_paths or not pdf_paths[c.companyRecordId]
+        }
+        if missing_pdf_ids:
+            missing_names = [
+                f"{c.bidderName}({c.companyRecordId})" for c in companies
+                if c.companyRecordId in missing_pdf_ids
+            ]
+            logger.warning(
+                f"[batch={batch_id}] {len(missing_pdf_ids)} 家公司 PDF 下载失败，"
+                f"当前检查项所有公司将返回 ERROR: {', '.join(missing_names)}"
+            )
+            for c in companies:
+                if c.companyRecordId in missing_pdf_ids:
+                    record_error(
+                        work_dir=WORK_DIR,
+                        batch_id=batch_id,
+                        item_code=item_code,
+                        stage="pdf_download",
+                        error="PDF download failed",
+                        company_record_id=c.companyRecordId,
+                        registration_company_id=c.registrationCompanyId,
+                        section_id=c.sectionId,
+                        filename=f"{c.companyRecordId}_{_sanitize_filename(c.bidderName)}.pdf",
+                        trace_id=trace_id,
+                        extra={"url": c.bidFileUrl},
+                    )
+            return _build_error_response(
+                request,
+                f"PDF 文件下载失败，无法完成当前检查项: {', '.join(missing_names)}",
+                stage="pdf_download",
+                trace_id=trace_id,
+            )
+
+        # 2. 路由到对应 handler
+        results = _dispatch_handler(
+            item_code, companies, pdf_paths, batch_id, trace_id=trace_id
+        )
+
+        # 3. 构建响应
+        response = AnalyzeResponse(
+            batchId=batch_id,
+            itemCode=item_code,
+            itemName=ITEM_CODE_NAMES.get(item_code, item_code),
+            results=results,
+        )
+
+        elapsed = time.time() - t0
+        failed_count = sum(1 for r in results if r.status == "FAILED")
+        error_count = sum(1 for r in results if r.status == "ERROR")
+        logger.info(f"[batch={batch_id}] 完成 — {item_code}, "
+                    f"{failed_count} FAILED, {error_count} ERROR / {len(results)} 家公司, "
+                    f"耗时 {elapsed:.1f}s, traceId={trace_id}")
+
+        return response
+    except Exception as e:
+        logger.error(
+            f"[batch={batch_id}] {item_code} 分析异常 "
+            f"(traceId={trace_id}): {e}",
+            exc_info=True,
+        )
+        record_error(
+            work_dir=WORK_DIR,
+            batch_id=batch_id,
+            item_code=item_code,
+            stage="api_dispatch",
+            error=e,
+            trace_id=trace_id,
+            extra={"companyCount": len(companies)},
+        )
+        return _build_error_response(
+            request, str(e), stage="api_dispatch", trace_id=trace_id
+        )
 
 
 # ============================================================
@@ -1292,15 +1449,46 @@ async def analyze_item(request: AnalyzeRequest) -> AnalyzeResponse:
     if len(request.companies) < 2 and item_code in HEAVY_ITEMS:
         raise HTTPException(status_code=400, detail="此检查项至少需要 2 家公司")
 
+    trace_id = uuid.uuid4().hex[:12]
     future = _executor.submit(_run_analysis_sync, request)
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=SYNC_TIMEOUT)
     except asyncio.TimeoutError:
-        logger.error(f"[batch={request.batchId}] {item_code} 检测超时（{SYNC_TIMEOUT}s）")
-        return _build_error_response(request, f"检测超时（{SYNC_TIMEOUT}秒）")
+        logger.error(
+            f"[batch={request.batchId}] {item_code} 检测超时"
+            f"（{SYNC_TIMEOUT}s, traceId={trace_id}）"
+        )
+        record_error(
+            work_dir=WORK_DIR,
+            batch_id=request.batchId,
+            item_code=item_code,
+            stage="api_timeout",
+            error=f"检测超时（{SYNC_TIMEOUT}秒）",
+            trace_id=trace_id,
+            extra={"timeoutSeconds": SYNC_TIMEOUT},
+        )
+        return _build_error_response(
+            request,
+            f"检测超时（{SYNC_TIMEOUT}秒）",
+            stage="api_timeout",
+            trace_id=trace_id,
+        )
     except Exception as e:
-        logger.exception(f"[batch={request.batchId}] {item_code} 分析失败: {e}")
-        return _build_error_response(request, str(e))
+        logger.exception(
+            f"[batch={request.batchId}] {item_code} 分析失败 "
+            f"(traceId={trace_id}): {e}"
+        )
+        record_error(
+            work_dir=WORK_DIR,
+            batch_id=request.batchId,
+            item_code=item_code,
+            stage="api_future",
+            error=e,
+            trace_id=trace_id,
+        )
+        return _build_error_response(
+            request, str(e), stage="api_future", trace_id=trace_id
+        )
 
 
 @app.get("/api/v1/collusive-check/health")
