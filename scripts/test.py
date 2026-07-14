@@ -11,12 +11,11 @@
 import argparse
 import json
 import re
-import shutil
-import sys
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -43,23 +42,8 @@ def _start_file_server(directory: Path, host: str, port: int):
     return server
 
 
-def _ensure_ascii_copy(pdf: Path) -> Path:
-    """Windows 下创建 ASCII 文件副本解决 GBK/UTF-8 编码问题"""
-    if sys.platform != "win32":
-        return pdf
-    stem = pdf.stem
-    m = re.match(r'^(\d+)_', stem)
-    if not m:
-        return pdf
-    ascii_name = f"{m.group(1)}_test.pdf"
-    ascii_path = pdf.parent / ascii_name
-    if not ascii_path.exists():
-        shutil.copy2(pdf, ascii_path)
-    return ascii_path
-
-
 def _parse_pdfs(pdf_dir: Path, file_host: str, file_port: int):
-    """扫描 PDF 目录，从文件名解析公司信息"""
+    """扫描 PDF 目录，从文件名解析公司信息（直接使用原始文件，不创建副本）"""
     pdfs = sorted(p for p in pdf_dir.glob("*.pdf") if not p.stem.endswith("_test"))
     if len(pdfs) < 2:
         raise SystemExit(f"PDF 不足（至少 2 个），当前 {len(pdfs)} 个: {pdf_dir}")
@@ -72,13 +56,12 @@ def _parse_pdfs(pdf_dir: Path, file_host: str, file_port: int):
             continue
         record_id = int(m.group(1))
         bidder_name = m.group(2)
-        ascii_pdf = _ensure_ascii_copy(pdf)
         companies.append({
             "companyRecordId": record_id,
             "registrationCompanyId": record_id + 100,
             "sectionId": 11,
             "bidderName": bidder_name,
-            "bidFileUrl": f"http://{file_host}:{file_port}/{ascii_pdf.name}",
+            "bidFileUrl": f"http://{file_host}:{file_port}/{quote(pdf.name)}",
         })
     return companies
 
@@ -94,6 +77,7 @@ def main():
     parser.add_argument("--lightweight", action="store_true", help="仅轻量项")
     parser.add_argument("--heavy", action="store_true", help="仅重型项")
     parser.add_argument("--all", action="store_true", help="全部 7 项（默认）")
+    parser.add_argument("--no-response", action="store_true", help="不输出响应 JSON")
     args = parser.parse_args()
 
     # 确定测试范围
@@ -143,6 +127,8 @@ def main():
             success = sum(1 for r in rlist if r["status"] == "SUCCESS")
             errors = sum(1 for r in rlist if r["status"] == "ERROR")
             print(f"  [{item_code}] {elapsed:.1f}s  FAILED={failed} SUCCESS={success} ERROR={errors}")
+            if not args.no_response:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
             results.append({"code": item_code, "elapsed": elapsed, "failed": failed, "success": success, "error": errors})
         except requests.exceptions.Timeout:
             elapsed = time.perf_counter() - t0
@@ -162,6 +148,7 @@ def main():
         print(f"{r['code']:35s} {r['elapsed']:>6.1f}s  {r['failed']:>6d} {r['success']:>7d} {r['error']:>5d}{flag}")
     total = sum(r["elapsed"] for r in results)
     print(f"\n总耗时: {total:.1f}s ({total/60:.1f}min)")
+
 
 
 if __name__ == "__main__":
